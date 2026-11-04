@@ -45,6 +45,7 @@ private:
     QWidget *buildRightPanel();
 
     void log(const QString &msg);
+    void flushLog();                   // 把攒着的日志一次性刷进控件
     void setConnUi(bool connected, const QString &detail);
     bool isDraftMode() const;          // 模式：上传新章 / 校对已有草稿
     void updateModeUi();
@@ -94,6 +95,8 @@ private:
 
     // 右侧
     QPlainTextEdit *m_log = nullptr;
+    QStringList     m_logBuf;          // 待刷新的日志行：攒一批再插，别每条都触发一次重排+重绘
+    QTimer         *m_logTimer = nullptr;
 
     QTimer *m_autoConnect = nullptr;   // 启动客户端后自动重试连接
     int     m_autoTry = 0;

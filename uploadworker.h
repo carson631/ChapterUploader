@@ -66,6 +66,14 @@ private:
               std::function<bool(const QJsonObject &)> pred,
               int intervalMs, int timeoutMs,
               std::function<void(bool ok, const QJsonObject &obj)> done);
+
+    // 条件等待（waitThen）：把原来「死等 N 毫秒」换成「一就绪就走」。
+    // capMs 就是原来那个固定延时 —— 到点不管怎样都继续，所以最坏情况和旧版一模一样，
+    // 只可能更快，不会更慢。minMs 给客户端留最小沉降时间，别在写完的下一毫秒就判「好了」。
+    void waitThen(int step, const QString &js,
+                  std::function<bool(const QJsonObject &)> pred,
+                  int capMs, int minMs = 0);
+
     void stopPoll() { ++m_pollSeq; }
 
     void runJs(const QString &js, std::function<void(bool, const QJsonObject &)> done);

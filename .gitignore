@@ -13,6 +13,7 @@ build-*/
 # 运行时产物（便携版打包目录、压缩包：都随 Release 附件发布，不进 git）
 debug/
 dist/
+dist-test/
 dist-archive/
 *.zip
 

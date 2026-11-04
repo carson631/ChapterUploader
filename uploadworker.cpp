@@ -16,12 +16,12 @@ enum Step {
     S_SelectPrev = 0,     // 先选中上一章（新建章插在选中章之后）
     S_SkipDone,
     S_NewChapter,
-    S_AfterNew,
     S_Title,
     S_FocusBody,          // 标题填完把焦点挪进正文区（否则 setContent 写不进当前章）
     S_Body,
     S_Verify,
     S_ProofreadOpen,
+    S_PanelInfo,          // 等校对面板渲染出来，把各检测块的状态记进日志
     S_CheckClick,
     S_WaitResult,
     S_AfterChecks,        // 收尾：复核还有没有漏网的红线
@@ -128,11 +128,11 @@ void UploadWorker::ensureWritePage()
 void UploadWorker::waitForWriteTarget(int attempt)
 {
     const int gen = m_gen;
-    if (attempt > 40) {                          // 20 秒
-        failStart(QStringLiteral("等写作页加载超时（20 秒）。客户端里可能弹了窗，看一眼再重试。"));
+    if (attempt > 60) {                          // 60 × 300ms ≈ 18 秒
+        failStart(QStringLiteral("等写作页加载超时（18 秒）。客户端里可能弹了窗，看一眼再重试。"));
         return;
     }
-    QTimer::singleShot(500, this, [this, gen, attempt]() {
+    QTimer::singleShot(300, this, [this, gen, attempt]() {
         if (gen != m_gen || !m_running)
             return;
         // 当前连接的页面变成写作页了？
@@ -270,7 +270,8 @@ void UploadWorker::nextStep()
         break;
 
     case S_DraftWait: {
-        // 连续两次读到「标题对上 + 正文非空」才算加载好，避免标题先换、正文还在路上
+        // 连续三次读到「标题对上 + 正文非空」才算加载好，避免标题先换、正文还在路上
+        // （原来 700ms 两次；现在 300ms 三次 ≈ 0.6 秒的稳定窗口，比原来的 1.4 秒短）
         auto hits = std::make_shared<int>(0);
         poll(QStringLiteral("__yw.draftReady(%1)").arg(c.no),
              [hits](const QJsonObject &o) {
@@ -281,9 +282,9 @@ void UploadWorker::nextStep()
                      *hits = 0;
                      return false;
                  }
-                 return ++*hits >= 2;
+                 return ++*hits >= 3;
              },
-             700, 25000,
+             300, 25000,
              [this, gen, c](bool ok, const QJsonObject &o) {
                  if (gen != m_gen) return;
                  const QString title = o.value(QStringLiteral("title")).toString();
@@ -366,7 +367,7 @@ void UploadWorker::nextStep()
                                                  + o.value(QStringLiteral("active")).toString();
                              return all.contains(k1) || all.contains(k2);
                          },
-                         400, 6000,
+                         200, 6000,
                          [this, gen, c](bool loaded, const QJsonObject &o) {
                              if (gen != m_gen) return;
                              if (!loaded) {
@@ -418,7 +419,7 @@ void UploadWorker::nextStep()
                                              + o.value(QStringLiteral("active")).toString();
                          return all.contains(k1) || all.contains(k2);
                      },
-                     400, 6000,
+                     200, 6000,
                      [this, gen, prev](bool loaded, const QJsonObject &o) {
                          if (gen != m_gen) return;
                          if (!loaded)
@@ -439,31 +440,56 @@ void UploadWorker::nextStep()
         break;
 
     case S_NewChapter:
-        runJs(QStringLiteral("__yw.clickNewChapter()"), [this, gen](bool ok, const QJsonObject &r) {
+        // 点「新建章」之前先记下 hash 和侧栏条目数：点完靠它俩判断新章是不是真建出来了
+        runJs(QStringLiteral("(()=>{window.__cuDlg=0;"
+                             "window.__cuMark={h:location.hash,"
+                             "n:document.querySelectorAll('[id^=\"chapter_\"]').length};"
+                             "return {ok:true}})()"),
+              [this, gen, c](bool, const QJsonObject &) {
             if (gen != m_gen) return;
-            if (!ok || !r.value(QStringLiteral("ok")).toBool()) {
-                const QJsonArray btns = r.value(QStringLiteral("buttons")).toArray();
-                QStringList names;
-                for (const QJsonValue &v : btns) names << v.toString();
-                failChapter(QStringLiteral("点不到「新建章」：%1；可见按钮：%2")
-                                .arg(r.value(QStringLiteral("why")).toString(),
-                                     names.join(QStringLiteral(" / "))));
-                return;
-            }
-            scheduleNext(S_AfterNew, 1600);
+            runJs(QStringLiteral("__yw.clickNewChapter()"), [this, gen, c](bool ok, const QJsonObject &r) {
+                if (gen != m_gen) return;
+                if (!ok || !r.value(QStringLiteral("ok")).toBool()) {
+                    const QJsonArray btns = r.value(QStringLiteral("buttons")).toArray();
+                    QStringList names;
+                    for (const QJsonValue &v : btns) names << v.toString();
+                    failChapter(QStringLiteral("点不到「新建章」：%1；可见按钮：%2")
+                                    .arg(r.value(QStringLiteral("why")).toString(),
+                                         names.join(QStringLiteral(" / "))));
+                    return;
+                }
+                // 原来是「死等 1600 + 1000 毫秒」。现在边等边探：新章一出来立刻写标题，
+                // 顺带把「内容未保存，是否继续」这类弹窗点掉（每章只点一次）。
+                // 探测的最长等待仍是 2600ms —— 到点无条件继续，最坏情况与旧版一致。
+                const QString no = QString::number(c.no);
+                const QString probe = QStringLiteral(
+                    "(()=>{const m=window.__cuMark||{};"
+                    "const t=document.querySelector('#chapter-title');"
+                    "const title=t?t.value.trim():'';"
+                    "const n=document.querySelectorAll('[id^=\"chapter_\"]').length;"
+                    "const d=[...document.querySelectorAll('button')].filter(x=>x.offsetParent)"
+                    ".find(x=>/^(确定|继续|保存并继续|是)$/.test((x.innerText||'').trim()));"
+                    "if(d&&!window.__cuDlg){window.__cuDlg=1;try{d.click()}catch(e){}}"
+                    "return {grew:(location.hash!==(m.h||''))||(n>(m.n||0)),"
+                    "mark:!!m.h,title:title,n:n,dlg:!!d}})()");
+                waitThen(S_Title, probe,
+                         [no](const QJsonObject &o) {
+                             if (!o.value(QStringLiteral("mark")).toBool())
+                                 return false;              // 打点没打上（页面刚刷新？）→ 等满再走
+                             if (o.value(QStringLiteral("dlg")).toBool())
+                                 return false;              // 弹窗还挂着，点掉再说
+                             if (!o.value(QStringLiteral("grew")).toBool())
+                                 return false;              // 新章还没出现
+                             const QString title = o.value(QStringLiteral("title")).toString();
+                             // 标题框要么是空的（新章还没名字），要么已经是这一章 ——
+                             // 否则很可能还是上一章的标题，再等等，别把标题写进上一章
+                             return title.isEmpty()
+                                    || title.contains(QStringLiteral("第%1章").arg(no))
+                                    || title.contains(QStringLiteral("第 %1 章").arg(no));
+                         },
+                         2600, 250);
+            });
         });
-        break;
-
-    case S_AfterNew:
-        // 新建章偶尔会弹「内容未保存，是否继续」之类，能点就点掉
-        runJs(QStringLiteral(
-                  "(()=>{const b=[...document.querySelectorAll('button')].filter(x=>x.offsetParent)"
-                  ".find(x=>/^(确定|继续|保存并继续|是)$/.test((x.innerText||'').trim()));"
-                  "if(b){b.click();return b.innerText.trim()}return ''})()"),
-              [this, gen](bool, const QJsonObject &) {
-                  if (gen != m_gen) return;
-                  scheduleNext(S_Title, 1000);
-              });
         break;
 
     case S_Title: {
@@ -521,7 +547,7 @@ void UploadWorker::nextStep()
 
     case S_Body:
         runJs(QStringLiteral("__yw.setBody(%1)").arg(jsStr(c.html())),
-              [this, gen](bool ok, const QJsonObject &r) {
+              [this, gen, want = c.chars](bool ok, const QJsonObject &r) {
                   if (gen != m_gen) return;
                   if (!ok || !r.value(QStringLiteral("ok")).toBool()) {
                       failChapter(QStringLiteral("正文填充失败：%1")
@@ -531,7 +557,14 @@ void UploadWorker::nextStep()
                   emit log(QStringLiteral("  正文写入（%1 %2）")
                                .arg(r.value(QStringLiteral("via")).toString(),
                                     r.value(QStringLiteral("id")).toString()));
-                  scheduleNext(S_Verify, 1500);
+                  // 原来是死等 1500ms 再校验。现在盯着编辑器字数：够了就走（留 500ms 让
+                  // 客户端把 blur/自动保存的抖动过去），不够就等满 1500ms 仍去校验（照旧会报错重写）
+                  waitThen(S_Verify, QStringLiteral("__yw.bodyState()"),
+                           [want](const QJsonObject &o) {
+                               const int got = o.value(QStringLiteral("chars")).toInt();
+                               return got > 0 && qAbs(got - want) <= qMax(20, want / 50);
+                           },
+                           1500, 500);
               });
         break;
 
@@ -587,29 +620,40 @@ void UploadWorker::nextStep()
                 emit log(QStringLiteral("  校对面板本来是展开的（还挂着上一章结果），已收起重开"));
             else if (r.value(QStringLiteral("already")).toBool())
                 emit log(QStringLiteral("  校对面板已展开，直接用（不重复点「校对」，那是开关）"));
-            // 等面板渲染出来，先把「有几块检测、各自什么状态」记进日志，方便核对选择器
-            QTimer::singleShot(900, this, [this, gen]() {
-                if (gen != m_gen || !m_running) return;
-                runJs(QStringLiteral("({k: __yw.checkKinds()})"),
-                      [this, gen](bool ok2, const QJsonObject &r2) {
-                    if (gen != m_gen) return;
-                    if (ok2) {
-                        QStringList parts;
-                        for (const QJsonValue &v : r2.value(QStringLiteral("k")).toArray()) {
-                            const QJsonObject o = v.toObject();
-                            parts << QStringLiteral("%1（%2｜%3）")
-                                         .arg(o.value(QStringLiteral("label")).toString(),
-                                              o.value(QStringLiteral("header")).toString(),
-                                              o.value(QStringLiteral("state")).toString());
-                        }
-                        emit log(parts.isEmpty()
-                                     ? QStringLiteral("  ⚠ 校对面板里没找到检测块")
-                                     : QStringLiteral("  校对面板：%1").arg(parts.join(QStringLiteral(" / "))));
-                    }
-                    m_kindIdx = 0;
-                    scheduleNext(S_CheckClick, 400);
-                });
-            });
+            // 等面板渲染出来（原来是死等 900ms）：检测按钮的文案都出来了才往下走，
+            // 免得面板还没渲染完就去点「检测」被当成没有这一块
+            waitThen(S_PanelInfo, QStringLiteral("({k: __yw.checkKinds()})"),
+                     [](const QJsonObject &o) {
+                         for (const QJsonValue &v : o.value(QStringLiteral("k")).toArray()) {
+                             if (!v.toObject().value(QStringLiteral("button")).toString().trimmed().isEmpty())
+                                 return true;
+                         }
+                         return false;
+                     },
+                     900, 200);
+        });
+        break;
+
+    // 面板就绪：先把「有几块检测、各自什么状态」记进日志，方便核对选择器
+    case S_PanelInfo:
+        runJs(QStringLiteral("({k: __yw.checkKinds()})"),
+              [this, gen](bool ok2, const QJsonObject &r2) {
+            if (gen != m_gen) return;
+            if (ok2) {
+                QStringList parts;
+                for (const QJsonValue &v : r2.value(QStringLiteral("k")).toArray()) {
+                    const QJsonObject o = v.toObject();
+                    parts << QStringLiteral("%1（%2｜%3）")
+                                 .arg(o.value(QStringLiteral("label")).toString(),
+                                      o.value(QStringLiteral("header")).toString(),
+                                      o.value(QStringLiteral("state")).toString());
+                }
+                emit log(parts.isEmpty()
+                             ? QStringLiteral("  ⚠ 校对面板里没找到检测块")
+                             : QStringLiteral("  校对面板：%1").arg(parts.join(QStringLiteral(" / "))));
+            }
+            m_kindIdx = 0;
+            scheduleNext(S_CheckClick, 200);
         });
         break;
 
@@ -623,7 +667,7 @@ void UploadWorker::nextStep()
         const QString kind  = m_checkKinds.at(m_kindIdx);
         const QString label = labelOfKind(kind);
         runJs(QStringLiteral("__yw.clickCheck(%1)").arg(jsStr(kind)),
-              [this, gen, label](bool ok, const QJsonObject &r) {
+              [this, gen, label, kind](bool ok, const QJsonObject &r) {
             if (gen != m_gen) return;
             if (!ok || !r.value(QStringLiteral("ok")).toBool()) {
                 QStringList kinds;
@@ -642,7 +686,18 @@ void UploadWorker::nextStep()
             emit log(QStringLiteral("  %1检测 → %2，等结果（最长 60 秒）")
                          .arg(label, already ? QStringLiteral("已在检测中")
                                              : r.value(QStringLiteral("header")).toString()));
-            scheduleNext(S_WaitResult, already ? 1000 : 3500);
+            // 原来是死等 3500ms（已在检测中则 1000ms）才开始查状态。
+            // 现在一看到「不再是未检测」就走 —— 客户端通常 200~400ms 就置成检测中，
+            // 每块检测能省 3 秒左右，两块就是一章 5~6 秒。
+            const int cap = already ? 1000 : 3500;
+            waitThen(S_WaitResult, QStringLiteral("__yw.checkState(%1)").arg(jsStr(kind)),
+                     [](const QJsonObject &o) {
+                         if (!o.value(QStringLiteral("found")).toBool())
+                             return true;                       // 没这一块，别等
+                         const QString st = o.value(QStringLiteral("state")).toString();
+                         return !st.isEmpty() && st != QLatin1String("idle");
+                     },
+                     cap, 150);
         });
         break;
     }
@@ -661,7 +716,7 @@ void UploadWorker::nextStep()
                  // state 由页面侧算好：busy=检测中 / done=出结果 / idle=未检测 / unknown
                  // 只看这一块自己的标题，不会把隔壁那块的「未检测」算进来
                  const QString st = o.value(QStringLiteral("state")).toString();
-                 if (gen == m_gen && ++*ticks % 8 == 1)      // 每 8 秒打一行，卡住时能看出卡在哪
+                 if (gen == m_gen && ++*ticks % 16 == 1)     // 0.5 秒一拍，每 8 秒打一行
                      emit log(QStringLiteral("    …等「%1」：%2%3")
                                   .arg(label, st.isEmpty() ? QStringLiteral("unknown") : st,
                                        o.value(QStringLiteral("header")).toString().isEmpty()
@@ -670,7 +725,7 @@ void UploadWorker::nextStep()
                                                  .arg(o.value(QStringLiteral("header")).toString())));
                  // 点了没反应（一直是「未检测」）就补点，最多两次
                  if (st == QLatin1String("idle")) {
-                     if (++*idleTicks >= 6 && *reclicks < 2 && gen == m_gen) {
+                     if (++*idleTicks >= 12 && *reclicks < 2 && gen == m_gen) {   // 12 拍 = 6 秒
                          ++*reclicks;
                          *idleTicks = 0;
                          emit log(QStringLiteral("  「%1」还显示未检测，补点一次检测按钮").arg(label));
@@ -682,7 +737,7 @@ void UploadWorker::nextStep()
                  }
                  return st == QLatin1String("done");
              },
-             1000, 60000,
+             500, 60000,
              [this, gen, label](bool ok, const QJsonObject &o) {
                  if (gen != m_gen) return;
                  if (!ok) {
@@ -950,4 +1005,25 @@ void UploadWorker::poll(const QString &js,
         });
     };
     m_pollLoop();
+}
+
+// 条件等待：和 poll 同一套失效机制，只是「条件满足」和「等够了」都进入下一步。
+// 原来是 QTimer::singleShot(1600) 那种死等，现在最多 120ms 一轮探测。
+void UploadWorker::waitThen(int step, const QString &js,
+                            std::function<bool(const QJsonObject &)> pred,
+                            int capMs, int minMs)
+{
+    const int gen = m_gen;
+    auto t0 = std::make_shared<QElapsedTimer>();
+    t0->start();
+    poll(js,
+         [pred, t0, minMs](const QJsonObject &o) {
+             return t0->elapsed() >= minMs && pred(o);
+         },
+         120, capMs,
+         [this, gen, step](bool, const QJsonObject &) {
+             if (gen != m_gen || !m_running)
+                 return;
+             scheduleNext(step, 0);
+         });
 }

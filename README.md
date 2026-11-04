@@ -7,11 +7,11 @@
 
 ## 下载
 
-最新版在 Releases：[`ChapterUploader v1.0.0`](https://github.com/carson631/ChapterUploader/releases/latest)
+最新版在 Releases：[`ChapterUploader v1.0.1`](https://github.com/carson631/ChapterUploader/releases/latest)
 
 | 文件 | 说明 |
 |---|---|
-| `ChapterUploader-v1.0.0-win64-portable.zip` | **推荐**，解压即用，已带 Qt 6.8 运行库 |
+| `ChapterUploader-v1.0.1-win64-portable.zip` | **推荐**，解压即用，已带 Qt 6.8 运行库 |
 | `ChapterUploader.exe` | 单文件，需自备 Qt 运行库 |
 
 系统要求：Windows 10/11 x64 + 已安装客户端「阅文·作家助手」。
@@ -191,7 +191,7 @@ windeployqt --release --no-translations --no-opengl-sw dist/ChapterUploader.exe
 - **跳章依赖 Pinia 的 `$pinia`**（`#app.__vue_app__`）。如果客户端关掉 devtools 便捷属性或换状态管理，脚本能退化到「展开分卷 + 滚列表」，但会慢不少。
 - 校对是 AI 服务，**逐条自动替换会连误判一起改**，重要章节建议先跑一章看看，或把「收尾动作」设成不发布，人工扫一眼再发。
 - 客户端如果弹了意料之外的对话框（活动推广、版本更新），脚本只认「确定/继续/保存并继续/是」，其他弹窗需要手动关。
-- 串行执行、一章约 20~60 秒（主要耗在校对检测的十几秒）。没有做并发，并发会打乱编辑器状态。
+- 串行执行、一章约 10~50 秒（主要耗在校对检测的十几秒，服务端 AI 算的，程序侧压不动）。没有做并发，并发会打乱编辑器状态。
 - 书里**分卷超过约 6 卷、且已全部展开**时，侧栏虚拟列表很长，纯 DOM 定位会变慢（现在默认走目录跳章，不受影响）。
 
 ### 脚本与 C++ 之间的字段契约

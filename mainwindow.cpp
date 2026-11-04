@@ -93,6 +93,13 @@ MainWindow::MainWindow(QWidget *parent)
     m_cdp    = new CdpClient(this);
     m_worker = new UploadWorker(m_cdp, this);
 
+    // 日志批量刷新：跑校对时一秒可能蹦十几行，逐条 appendPlainText 会让控件反复重排，
+    // 攒 120ms 一批再插，界面和状态机都不被日志拖慢（内容、顺序完全不变）
+    m_logTimer = new QTimer(this);
+    m_logTimer->setSingleShot(true);
+    m_logTimer->setInterval(120);
+    connect(m_logTimer, &QTimer::timeout, this, &MainWindow::flushLog);
+
     auto *central = new QWidget;
     central->setObjectName(QStringLiteral("root"));
     auto *root = new QVBoxLayout(central);
@@ -118,7 +125,7 @@ MainWindow::MainWindow(QWidget *parent)
     appSub->setObjectName(QStringLiteral("appSub"));
     hl->addWidget(appSub);
     hl->addSpacing(4);
-    auto *ver = new QLabel(QStringLiteral("v1.0"));
+    auto *ver = new QLabel(QStringLiteral("v1.0.1"));
     ver->setObjectName(QStringLiteral("verChip"));
     hl->addWidget(ver);
     root->addWidget(header);
@@ -193,6 +200,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_running = false;
         updateRunUi();
         log(QStringLiteral("=== 结束：成功 %1，失败 %2 ===").arg(ok).arg(fail));
+        flushLog();                       // 收尾这一行立刻可见，不用等批量刷新
         if (ok > 0 && fail == 0) {
             // 记录进度，下次默认从这里继续
             QSettings s;
@@ -519,13 +527,18 @@ QWidget *MainWindow::buildRightPanel()
     connect(jsBtn, &QPushButton::clicked, this, &MainWindow::runCustomJs);
     head->addWidget(jsBtn);
     auto *clearBtn = new QPushButton(QStringLiteral("清空"));
-    connect(clearBtn, &QPushButton::clicked, this, [this]() { m_log->clear(); });
+    connect(clearBtn, &QPushButton::clicked, this, [this]() {
+        if (m_logTimer) m_logTimer->stop();
+        m_logBuf.clear();
+        m_log->clear();
+    });
     head->addWidget(clearBtn);
     cv->addLayout(head);
 
     m_log = new QPlainTextEdit;
     m_log->setReadOnly(true);
-    m_log->setMaximumBlockCount(5000);
+    m_log->setUndoRedoEnabled(false);     // 只读日志用不到撤销栈，开着白吃内存（长跑几小时差别明显）
+    m_log->setMaximumBlockCount(4000);    // 只留最近 4000 行：控件不会越跑越慢
     m_log->setObjectName(QStringLiteral("log"));
     cv->addWidget(m_log, 1);
 
@@ -1154,6 +1167,7 @@ void MainWindow::revertClientPatch()
 
 void MainWindow::closeEvent(QCloseEvent *e)
 {
+    flushLog();
     saveSettings();
     m_worker->stop();
     m_cdp->close();
@@ -1165,7 +1179,23 @@ void MainWindow::closeEvent(QCloseEvent *e)
 void MainWindow::log(const QString &msg)
 {
     const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("hh:mm:ss"));
-    m_log->appendPlainText(QStringLiteral("[%1] %2").arg(ts, msg));
+    m_logBuf << QStringLiteral("[%1] %2").arg(ts, msg);
+    if (!m_log)                       // 控件还没建好（构造早期），先攒着
+        return;
+    if (m_logBuf.size() >= 200)       // 一次刷太多行反而卡，先刷一批
+        flushLog();
+    else if (m_logTimer && !m_logTimer->isActive())
+        m_logTimer->start();
+}
+
+void MainWindow::flushLog()
+{
+    if (m_logTimer)
+        m_logTimer->stop();
+    if (!m_log || m_logBuf.isEmpty())
+        return;
+    m_log->appendPlainText(m_logBuf.join(QLatin1Char('\n')));   // 一批一次插入
+    m_logBuf.clear();
 }
 
 void MainWindow::setConnUi(bool connected, const QString &detail)
