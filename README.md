@@ -5,6 +5,19 @@
 
 ---
 
+## 下载
+
+最新版在 Releases：[`ChapterUploader v1.0.0`](https://github.com/carson631/ChapterUploader/releases/latest)
+
+| 文件 | 说明 |
+|---|---|
+| `ChapterUploader-v1.0.0-win64-portable.zip` | **推荐**，解压即用，已带 Qt 6.8 运行库 |
+| `ChapterUploader.exe` | 单文件，需自备 Qt 运行库 |
+
+系统要求：Windows 10/11 x64 + 已安装客户端「阅文·作家助手」。
+
+---
+
 ## 界面预览
 
 **上传新章**（左侧选作品、章节目录、区间；右侧是章节表与实时日志）
