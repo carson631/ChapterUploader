@@ -45,4 +45,9 @@
 
 ## 校验
 
-`SHA256` 见附件旁的 release 说明；便携版由 `windeployqt --release --no-translations --no-opengl-sw` 生成。
+```
+3197699d34849d930df4e1fc484a5b7674782b1f413671f41e3f6b19b3483200  ChapterUploader-v1.0.0-win64-portable.zip
+347d99d6c86543ecafafee3c6ccb3411e1c334d7c0f734a016cd6d46f88a1b0d  ChapterUploader.exe
+```
+
+便携版由 `windeployqt --release --no-translations --no-opengl-sw` 生成（Qt 6.8.3 MinGW 64-bit）。
