@@ -1,0 +1,13 @@
+<RCC>
+    <qresource prefix="/">
+        <file>theme.qss</file>
+        <file>js/site.js</file>
+        <file>icons/app.png</file>
+        <file>icons/app-mark.png</file>
+        <file>icons/chevron-down.svg</file>
+        <file>icons/chevron-down-blue.svg</file>
+        <file>icons/spin-up.svg</file>
+        <file>icons/spin-down.svg</file>
+        <file>icons/check.svg</file>
+    </qresource>
+</RCC>

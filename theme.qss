@@ -1,0 +1,482 @@
+/* ChapterUploader 主题：浅色卡片风 + 品牌蓝头（写作工具，长时间看，别用深色）
+   下拉框 / 复选框 / 自旋框的箭头用 icons/ 里的 SVG 重绘（经 app.qrc 打进资源），
+   默认 Fusion 的小箭头太淡，看起来不像能点的控件。
+   注意：改 icons/ 下的 svg 必须重编（资源打进 exe 才生效）。 */
+
+* {
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    font-size: 13px;
+}
+
+QMainWindow, QWidget#root {
+    background: #eef1f6;
+}
+
+/* ---------------- 品牌头 ---------------- */
+
+QWidget#appHeader {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 #1e40af, stop:0.55 #2563eb, stop:1 #3b82f6);
+    border-radius: 12px;
+}
+
+QLabel#appTitle {
+    color: #ffffff;
+    font-size: 17px;
+    font-weight: 700;
+    background: transparent;
+}
+
+QLabel#appSub {
+    color: #cddcfb;
+    font-size: 12px;
+    background: transparent;
+}
+
+QLabel#appLogo {
+    background: transparent;
+    border: none;
+}
+
+QLabel#verChip {
+    color: #dbeafe;
+    background: rgba(255, 255, 255, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 10px;
+    padding: 2px 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+/* ---------------- 卡片与文字 ---------------- */
+
+QLabel {
+    color: #1f2937;
+    background: transparent;
+}
+
+QLabel[role="muted"] {
+    color: #6b7280;
+}
+
+QLabel#sectionTitle {
+    font-size: 14px;
+    font-weight: 600;
+    color: #111827;
+}
+
+QLabel#connDot {
+    font-size: 15px;
+    color: #9ca3af;
+}
+
+QLabel#connDot[state="on"] {
+    color: #16a34a;
+}
+
+QFrame#card {
+    background: #ffffff;
+    border: 1px solid #e4e8f0;
+    border-radius: 12px;
+}
+
+/* ---------------- 输入控件 ---------------- */
+
+QLineEdit, QSpinBox, QComboBox {
+    background: #ffffff;
+    border: 1px solid #d5dae4;
+    border-radius: 8px;
+    padding: 6px 10px;
+    min-height: 24px;
+    selection-background-color: #2563eb;
+    selection-color: #ffffff;
+}
+
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+    border-color: #2563eb;
+    background: #fdfeff;
+}
+
+QLineEdit:hover, QSpinBox:hover, QComboBox:hover {
+    border-color: #b6c3e2;
+}
+
+QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {
+    background: #f3f4f6;
+    color: #9ca3af;
+}
+
+/* 可编辑下拉（书名）里的内嵌输入框：去边框，跟外壳融为一体 */
+QComboBox QLineEdit {
+    background: transparent;
+    border: none;
+    padding: 0;
+    min-height: 20px;
+}
+
+/* ---------------- 下拉框：箭头要看得见 ---------------- */
+
+QComboBox {
+    padding-right: 30px;              /* 给箭头留位置，文字别压住它 */
+}
+
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    border: none;
+    border-left: 1px solid #e5e8f0;
+    width: 26px;
+    border-top-right-radius: 8px;
+    border-bottom-right-radius: 8px;
+}
+
+QComboBox::drop-down:hover {
+    background: #eef4ff;
+    border-left-color: #b6c3e2;
+}
+
+QComboBox::down-arrow {
+    image: url(:/icons/chevron-down.svg);
+    width: 12px;
+    height: 12px;
+}
+
+QComboBox::down-arrow:hover {
+    image: url(:/icons/chevron-down-blue.svg);
+}
+
+QComboBox::down-arrow:on {
+    image: url(:/icons/chevron-down-blue.svg);
+}
+
+QComboBox::down-arrow:disabled {
+    image: url(:/icons/chevron-down.svg);
+}
+
+/* 模式选择器：页面里最重要的开关之一，做成蓝底强调样式 */
+QComboBox#modeCombo {
+    background: #e8f0fe;
+    border: 1px solid #93b4f5;
+    color: #1d4ed8;
+    font-weight: 600;
+    padding: 7px 30px 7px 12px;
+    min-height: 24px;
+}
+
+QComboBox#modeCombo:hover {
+    background: #dbe8fe;
+    border-color: #2563eb;
+}
+
+QComboBox#modeCombo:focus {
+    border-color: #1d4ed8;
+}
+
+QComboBox#modeCombo:disabled {
+    background: #f3f4f6;
+    border-color: #e5e7eb;
+    color: #9ca3af;
+}
+
+QComboBox#modeCombo::drop-down {
+    border-left: 1px solid #c6d7f8;
+}
+
+QComboBox#modeCombo::down-arrow {
+    image: url(:/icons/chevron-down-blue.svg);
+}
+
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    border: 1px solid #e4e8f0;
+    border-radius: 8px;
+    selection-background-color: #e8f0fe;
+    selection-color: #1d4ed8;
+    outline: none;
+    padding: 4px;
+}
+
+QComboBox QAbstractItemView::item {
+    min-height: 28px;
+    padding: 3px 8px;
+    border-radius: 5px;
+}
+
+/* ---------------- 自旋框（章号区间） ---------------- */
+
+QSpinBox {
+    padding-right: 24px;
+}
+
+QSpinBox::up-button, QSpinBox::down-button {
+    subcontrol-origin: border;
+    border: none;
+    background: transparent;
+    width: 20px;
+}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background: #eef4ff;
+}
+
+QSpinBox::up-arrow {
+    image: url(:/icons/spin-up.svg);
+    width: 8px;
+    height: 6px;
+}
+
+QSpinBox::down-arrow {
+    image: url(:/icons/spin-down.svg);
+    width: 8px;
+    height: 6px;
+}
+
+QSpinBox::up-button  { subcontrol-position: top right; }
+QSpinBox::down-button { subcontrol-position: bottom right; }
+
+/* ---------------- 按钮 ---------------- */
+
+QPushButton {
+    background: #fbfcfe;
+    border: 1px solid #d5dae4;
+    border-radius: 8px;
+    padding: 6px 14px;
+    min-height: 24px;
+    color: #1f2937;
+}
+
+QPushButton:hover {
+    background: #f3f6fd;
+    border-color: #b6c3e2;
+    color: #1d4ed8;
+}
+
+QPushButton:pressed {
+    background: #e9eefb;
+    color: #1d4ed8;
+}
+
+QPushButton:focus {
+    border-color: #93b4f5;
+}
+
+QPushButton:disabled {
+    color: #a8aeb9;
+    background: #f6f7f9;
+    border-color: #e5e7eb;
+}
+
+QPushButton#primary {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #3b82f6, stop:1 #2563eb);
+    border: 1px solid #1d4ed8;
+    color: #ffffff;
+    font-weight: 600;
+    padding: 7px 18px;
+}
+
+QPushButton#primary:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #2f74ee, stop:1 #1d4ed8);
+    border-color: #1e40af;
+}
+
+QPushButton#primary:pressed {
+    background: #1e40af;
+}
+
+QPushButton#primary:focus {
+    border-color: #1e40af;
+}
+
+QPushButton#primary:disabled {
+    background: #a9c0f2;
+    border-color: #a9c0f2;
+    color: #ffffff;
+}
+
+QPushButton#danger {
+    color: #b91c1c;
+    border-color: #eec7c7;
+    background: #ffffff;
+    font-weight: 600;
+}
+
+QPushButton#danger:hover {
+    background: #fef2f2;
+    border-color: #e79a9a;
+}
+
+QPushButton#danger:pressed {
+    background: #fee2e2;
+}
+
+/* ---------------- 复选框 ---------------- */
+
+QCheckBox {
+    spacing: 6px;
+    color: #374151;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #c3c9d4;
+    border-radius: 4px;
+    background: #ffffff;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #2563eb;
+}
+
+QCheckBox::indicator:checked {
+    background: #2563eb;
+    border-color: #1d4ed8;
+    image: url(:/icons/check.svg);
+}
+
+QCheckBox::indicator:disabled {
+    background: #f3f4f6;
+    border-color: #e5e7eb;
+}
+
+/* 禁用但仍勾选（切到草稿模式后「校对」是强制勾上的）：勾要留着，只把颜色调淡，
+   否则看起来像没勾 —— 必须写在 :disabled 之后才生效 */
+QCheckBox::indicator:checked:disabled {
+    background: #b9c9ee;
+    border-color: #b9c9ee;
+    image: url(:/icons/check.svg);
+}
+
+/* ---------------- 表格 / 日志 / 进度条 ---------------- */
+
+QTableWidget {
+    background: #ffffff;
+    border: 1px solid #e4e8f0;
+    border-radius: 12px;
+    gridline-color: #eef1f6;
+    alternate-background-color: #fafbfe;
+    selection-background-color: #e8f0ff;
+    selection-color: #1f2937;
+}
+
+QHeaderView::section {
+    background: #f7f9fc;
+    color: #4b5563;
+    border: none;
+    border-bottom: 1px solid #e4e8f0;
+    padding: 8px 8px;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+QTableCornerButton::section {
+    background: #f7f9fc;
+    border: none;
+    border-bottom: 1px solid #e4e8f0;
+}
+
+QTableWidget::item {
+    padding: 4px 6px;
+}
+
+QPlainTextEdit#log {
+    background: #101a2e;
+    color: #d7e3f8;
+    border: 1px solid #1d2941;
+    border-radius: 10px;
+    font-family: Consolas, "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+    padding: 10px;
+    selection-background-color: #2563eb;
+}
+
+QProgressBar {
+    border: 1px solid #e4e8f0;
+    border-radius: 8px;
+    background: #ffffff;
+    height: 22px;
+    text-align: center;
+    color: #1f2937;
+    font-size: 12px;
+}
+
+QProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 #3b82f6, stop:1 #2563eb);
+    border-radius: 7px;
+}
+
+QStatusBar {
+    background: transparent;
+    color: #6b7280;
+    border-top: 1px solid #e1e6ef;
+    padding-left: 6px;
+    font-size: 12px;
+}
+
+QStatusBar::item {
+    border: none;
+}
+
+QSplitter::handle {
+    background: transparent;
+    width: 8px;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 9px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical {
+    background: #ccd4e2;
+    border-radius: 4px;
+    min-height: 26px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #a9b5c9;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 9px;
+    margin: 2px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #ccd4e2;
+    border-radius: 4px;
+    min-width: 26px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #a9b5c9;
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0;
+}
+
+QToolTip {
+    background: #111827;
+    color: #f9fafb;
+    border: 1px solid #374151;
+    border-radius: 6px;
+    padding: 5px 8px;
+}
+
+/* 放在最后：Qt 的层叠对伪状态优先级处理不一致，禁用态必须写在普通规则之后才生效 */
+QCheckBox:disabled {
+    color: #9ca3af;
+}
+QLabel:disabled {
+    color: #b0b6c0;
+}

@@ -1,0 +1,20 @@
+# 构建产物
+build/
+build-*/
+*.user
+*.autosave
+*.qmlc
+
+# 笔记 / IDE
+.qtcreator/
+.qtc_clangd/
+.vscode/
+
+# 运行时产物（便携版打包目录、压缩包：都随 Release 附件发布，不进 git）
+debug/
+dist/
+dist-archive/
+*.zip
+
+# 旧版界面截图（已被 docs/ui-upload.png、docs/ui-draft.png 取代）
+docs/ui.png
