@@ -1193,44 +1193,73 @@
     },
 
     // 面板：日期/时间共用 .ant-picker-dropdown，隐藏时带 ant-picker-dropdown-hidden
+    // 注意：日期和时间是两个独立的 dropdown，只有存在对应 panel 的才算，别拿错
     _pickerDropdown(kind) {
-      const list = [...document.querySelectorAll('.ant-picker-dropdown')]
-        .filter(d => !/ant-picker-dropdown-hidden/.test(d.className));
-      const shown = list.filter(visible);
-      const pool = shown.length ? shown : list.filter(d => d.querySelector('.ant-picker-panel-container'));
-      if (!kind) return pool[0] || null;
-      const want = kind === 'time' ? '.ant-picker-time-panel' : '.ant-picker-date-panel';
-      return pool.find(d => d.querySelector(want)) || pool[0] || null;
+      const panelSel = kind === 'time' ? '.ant-picker-time-panel'
+                     : kind === 'date' ? '.ant-picker-date-panel' : '';
+      const all = [...document.querySelectorAll('.ant-picker-dropdown')]
+        .filter(d => !/ant-picker-dropdown-hidden|-leave/.test(d.className));
+      const pick = list => kind ? (list.find(d => d.querySelector(panelSel)) || null) : (list[0] || null);
+      return pick(all.filter(visible));      // 不退回「不可见」的，那是上一次留下的残影
     },
 
-    // 打开某个输入框的面板。客户端的 Picker 只在 mousedown 上开面板（click() 不带 mousedown），
-    // 所以这里按 指针 → 鼠标 → 焦点 的顺序各来一遍，再等面板出现。
+    // 关掉当前所有面板（点弹窗标题；点弹窗外面会把整个弹窗关掉，不能那么干）
+    _closePickers() {
+      const neutral = document.querySelector('.ant-modal-title') || document.querySelector('.publish-body');
+      if (!neutral) return false;
+      const ev = (el, type) => {
+        try {
+          el.dispatchEvent(new (type.startsWith('pointer') ? PointerEvent : MouseEvent)(
+            type, { bubbles: true, cancelable: true, composed: true, view: window,
+                    button: 0, buttons: type === 'mousedown' ? 1 : 0,
+                    pointerType: 'mouse', isPrimary: true }));
+        } catch (e) { }
+      };
+      ev(neutral, 'pointerdown'); ev(neutral, 'mousedown');
+      ev(neutral, 'pointerup'); ev(neutral, 'mouseup');
+      return true;
+    },
+
+    // 打开某个输入框的面板。
+    // 客户端的 Picker 只在 mousedown 上开面板（click() 不带 mousedown），而且是「再按一下会关」的
+    // 切换语义 —— 所以每敲一次都要回头看一眼，别连敲两下把刚打开的面板又关掉。
     async _openPicker(inp, kind) {
       let dd = api._pickerDropdown(kind);
       if (dd) return dd;
-      const root = inp.closest('.ant-picker') || inp;
-      const ev = (el, type, opt) => {
-        try { el.dispatchEvent(new (type.startsWith('pointer') ? PointerEvent : MouseEvent)(
-          type, Object.assign({ bubbles: true, cancelable: true, composed: true,
-                                view: window, button: 0, buttons: type === 'mousedown' ? 1 : 0,
-                                pointerType: 'mouse', isPrimary: true }, opt || {}))); } catch (e) { }
+
+      const panelSel = kind === 'time' ? '.ant-picker-time-panel' : '.ant-picker-date-panel';
+      const ev = (el, type) => {
+        try {
+          el.dispatchEvent(new (type.startsWith('pointer') ? PointerEvent : MouseEvent)(
+            type, { bubbles: true, cancelable: true, composed: true, view: window,
+                    button: 0, buttons: type === 'mousedown' ? 1 : 0,
+                    pointerType: 'mouse', isPrimary: true }));
+        } catch (e) { }
       };
-      for (const el of [root, inp]) {
-        el.scrollIntoView({ block: 'center' });
+      // 关键：只发到 mouseup 为止。实测这个 Picker 是「mouseup 开、click 关」的切换语义，
+      // 补上 click 等于刚打开又自己关掉（日志里就表现为「面板没弹出来」）；focus 也别乱加。
+      const seq = el => {
+        try { el.scrollIntoView({ block: 'center' }); } catch (e) { }
         ev(el, 'pointerdown'); ev(el, 'mousedown');
-        try { el.focus(); } catch (e) { }
-        ev(el, 'pointerup'); ev(el, 'mouseup'); ev(el, 'click');
+        ev(el, 'pointerup'); ev(el, 'mouseup');
+      };
+
+      // 有任何旧面板残影都先关掉，免得点到上一次的 DOM
+      if (api._closePickers()) await sleepMs(180);
+
+      const root = inp.closest('.ant-picker') || inp;
+      for (const el of [root, inp, root]) {
+        seq(el);
+        for (let i = 0; i < 8 && !dd; i++) {
+          await sleepMs(100);
+          dd = api._pickerDropdown(kind);
+        }
+        if (dd) return dd;
       }
-      for (let i = 0; i < 10 && !dd; i++) {
-        await sleepMs(100);
-        dd = api._pickerDropdown(kind);
-      }
-      if (!dd) {
-        // 有的版本是「面板已存在但 display:none」（ant-picker-dropdown-hidden 没摘掉）
-        const hidden = [...document.querySelectorAll('.ant-picker-dropdown.ant-picker-dropdown-hidden')];
-        if (hidden.length) dd = hidden[0];
-      }
-      return dd;
+
+      // 有的版本是「面板已存在但 display:none」（ant-picker-dropdown-hidden 没摘掉）
+      return [...document.querySelectorAll('.ant-picker-dropdown.ant-picker-dropdown-hidden')]
+               .find(d => d.querySelector(panelSel)) || null;
     },
 
     // ---- 备用路径：不弹面板，直接改组件的 v-model ----
@@ -1407,6 +1436,13 @@
       await sleepMs(120);
       if (!pick(cols[1], m[2])) return { ok: false, why: '时间面板里没有 ' + m[2] + ' 分' };
       await sleepMs(120);
+
+      // 复核面板里真的选中了（点残影 DOM 时会出现「点了没反应」）
+      const sel = [...dd.querySelectorAll('.ant-picker-time-panel-cell-selected')].map(c =>
+        txt(c.querySelector('.ant-picker-time-panel-cell-inner') || c));
+      const wantH = String(parseInt(m[1], 10)), wantM = String(parseInt(m[2], 10));
+      if (sel.length < 2 || sel[0] !== wantH || sel[1] !== wantM)
+        return { ok: false, why: '面板里点了没选中（当前选中 ' + (sel.join(':') || '空') + '）' };
 
       // 面板底部的「确定」——不点它时间和日期都不生效
       const ok = dd.querySelector('.ant-picker-ok button')
