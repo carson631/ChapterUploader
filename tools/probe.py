@@ -9,6 +9,9 @@ import json
 import sys
 import urllib.request
 
+# 工具环境里常带 HTTP_PROXY，本机端口必须绕过代理
+urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
+
 import websocket
 
 PORT = 9222

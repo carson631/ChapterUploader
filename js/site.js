@@ -1,5 +1,5 @@
-// @sitejs 26  ← C++ 侧靠这一行判断 exe 目录里的 js/site.js 是不是本版本导出的；
-//               改脚本版本时这里和下面的 ver: 26 一起改，否则旧副本会被自动替换。
+// @sitejs 27  ← C++ 侧靠这一行判断 exe 目录里的 js/site.js 是不是本版本导出的；
+//               改脚本版本时这里和下面的 ver: 27 一起改，否则旧副本会被自动替换。
 // 起点作家助手（阅文 Electron 客户端 5.x）页面侧适配脚本
 // 由 ChapterUploader 通过 DevTools 协议注入，暴露 window.__yw 供 C++ 侧调用。
 // 选择器全部来自客户端 authorwrite_5.24.0 的渲染代码：
@@ -10,7 +10,7 @@
 //   一键改全部  button.modify-all
 //   编辑器      TinyMCE（inline），window.tinymce.activeEditor
 (function () {
-  if (window.__yw && window.__yw.ver >= 26) return 'cached';
+  if (window.__yw && window.__yw.ver >= 27) return 'cached';
 
   const txt = el => (el ? (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim() : '');
 
@@ -278,7 +278,7 @@
   const sleepMs = ms => new Promise(r => setTimeout(r, ms));
 
   const api = {
-    ver: 26,
+    ver: 27,
     _volCount: 0,        // 上次「全展开」时数到的分卷数
     _volAllOpen: false,  // 分卷是否已全部展开（避免每次都收起再展开，白折腾侧栏）
 
@@ -1195,33 +1195,131 @@
     // 面板：日期/时间共用 .ant-picker-dropdown，隐藏时带 ant-picker-dropdown-hidden
     _pickerDropdown(kind) {
       const list = [...document.querySelectorAll('.ant-picker-dropdown')]
-        .filter(d => visible(d) && !/ant-picker-dropdown-hidden/.test(d.className));
-      if (!kind) return list[0] || null;
+        .filter(d => !/ant-picker-dropdown-hidden/.test(d.className));
+      const shown = list.filter(visible);
+      const pool = shown.length ? shown : list.filter(d => d.querySelector('.ant-picker-panel-container'));
+      if (!kind) return pool[0] || null;
       const want = kind === 'time' ? '.ant-picker-time-panel' : '.ant-picker-date-panel';
-      return list.find(d => d.querySelector(want)) || list[0] || null;
+      return pool.find(d => d.querySelector(want)) || pool[0] || null;
     },
 
-    // 打开某个输入框的面板。已经开着就直接用（上一次尝试可能没关干净）
+    // 打开某个输入框的面板。客户端的 Picker 只在 mousedown 上开面板（click() 不带 mousedown），
+    // 所以这里按 指针 → 鼠标 → 焦点 的顺序各来一遍，再等面板出现。
     async _openPicker(inp, kind) {
       let dd = api._pickerDropdown(kind);
       if (dd) return dd;
-      inp.focus();
-      try { inp.click(); } catch (e) { }
-      for (let i = 0; i < 6 && !dd; i++) {
-        await sleepMs(120);
+      const root = inp.closest('.ant-picker') || inp;
+      const ev = (el, type, opt) => {
+        try { el.dispatchEvent(new (type.startsWith('pointer') ? PointerEvent : MouseEvent)(
+          type, Object.assign({ bubbles: true, cancelable: true, composed: true,
+                                view: window, button: 0, buttons: type === 'mousedown' ? 1 : 0,
+                                pointerType: 'mouse', isPrimary: true }, opt || {}))); } catch (e) { }
+      };
+      for (const el of [root, inp]) {
+        el.scrollIntoView({ block: 'center' });
+        ev(el, 'pointerdown'); ev(el, 'mousedown');
+        try { el.focus(); } catch (e) { }
+        ev(el, 'pointerup'); ev(el, 'mouseup'); ev(el, 'click');
+      }
+      for (let i = 0; i < 10 && !dd; i++) {
+        await sleepMs(100);
         dd = api._pickerDropdown(kind);
+      }
+      if (!dd) {
+        // 有的版本是「面板已存在但 display:none」（ant-picker-dropdown-hidden 没摘掉）
+        const hidden = [...document.querySelectorAll('.ant-picker-dropdown.ant-picker-dropdown-hidden')];
+        if (hidden.length) dd = hidden[0];
       }
       return dd;
     },
 
-    // 日期：必须是「弹出日历 → 点日期格子」
+    // ---- 备用路径：不弹面板，直接改组件的 v-model ----
+    // 客户端提交时读的是组件里的 fe.date / fe.time（源码里 do Publish 会先把它们解构出来），
+    // 而这两个值就是 `:value` + `@update:value` 绑定的对象。拿到 Picker 组件实例、调它的
+    // onUpdate:value，等于替用户选了一次日期/时间，弹窗里显示的值也会跟着刷新。
+    _pickerCmp(el) {
+      for (let n = el; n; n = n.parentElement) {
+        const inst = n.__vueParentComponent;
+        if (inst && inst.props && ('onUpdate:value' in inst.props || 'value' in inst.props)) return inst;
+      }
+      return null;
+    },
+
+    _pickerByModel(inp, kind, text) {
+      const inst = api._pickerCmp(inp.closest('.ant-picker') || inp);
+      if (!inst) return { ok: false, why: '拿不到 Picker 组件实例（__vueParentComponent 不可用）' };
+      const props = inst.props || {};
+      const upd = props['onUpdate:value'];
+      if (typeof upd !== 'function') return { ok: false, why: 'Picker 没有 onUpdate:value 回调' };
+      const base = props.value;
+      if (!base || typeof base.format !== 'function')
+        return { ok: false, why: '当前值不是 dayjs（' + typeof base + '），无法克隆' };
+      let next;
+      if (kind === 'date') {
+        const m = String(text).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if (!m) return { ok: false, why: '日期格式不对：' + text };
+        next = base.year(+m[1]).month(+m[2] - 1).date(+m[3]);
+      } else {
+        const m = String(text).match(/^(\d{1,2}):(\d{2})$/);
+        if (!m) return { ok: false, why: '时间格式不对：' + text };
+        next = base.hour(+m[1]).minute(+m[2]).second(0).millisecond(0);
+      }
+      upd(next);
+      return { ok: true, via: 'model', value: next.format(kind === 'date' ? 'YYYY-MM-DD' : 'HH:mm') };
+    },
+
+    // 最后一招：像人一样往输入框里打字再回车（时间框平时是 readonly，临时放开）
+    _pickerByTyping(inp, text) {
+      const wasRO = inp.readOnly;
+      try {
+        inp.readOnly = false;
+        inp.focus();
+        try { inp.select(); } catch (e) { }
+        let done = false;
+        try { done = document.execCommand && document.execCommand('insertText', false, text); } catch (e) { }
+        if (!done) {
+          inp.value = text;
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        const key = (type) => inp.dispatchEvent(new KeyboardEvent(type, {
+          bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }));
+        key('keydown'); key('keyup');
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, why: String(e && e.message || e) };
+      } finally {
+        inp.readOnly = wasRO;
+      }
+    },
+
+    // 日期：先走「弹出日历 → 点日期格子」；不行再改组件值；还不行就往输入框里敲
     async setScheduleDate(text) {
       const ins = api._schedInputs();
       const inp = ins.date;
       if (!inp) return { ok: false, why: '找不到日期输入框' };
-      const m = String(text || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
-      if (!m) return { ok: false, why: '日期格式必须是 YYYY-MM-DD（收到 ' + text + '）' };
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(text || '')))
+        return { ok: false, why: '日期格式必须是 YYYY-MM-DD（收到 ' + text + '）' };
 
+      const tries = [];
+      const r1 = await api._dateByPanel(inp, text);
+      if (r1.ok) return r1;
+      tries.push('日历面板：' + r1.why);
+
+      const r2 = api._pickerByModel(inp, 'date', text);
+      await sleepMs(180);
+      if (r2.ok && (inp.value || '').trim() === text) return { ok: true, via: 'model', got: text };
+      tries.push('改组件值：' + (r2.ok ? '显示没刷新（' + (inp.value || '') + '）' : r2.why));
+
+      const r3 = api._pickerByTyping(inp, text);
+      await sleepMs(200);
+      if (r3.ok && (inp.value || '').trim() === text) return { ok: true, via: 'typing', got: text };
+      tries.push('输入框输入：' + (r3.ok ? '显示没刷新（' + (inp.value || '') + '）' : r3.why));
+
+      return { ok: false, got: (inp.value || '').trim(), why: tries.join('；') };
+    },
+
+    async _dateByPanel(inp, text) {
+      const m = String(text || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
       const dd = await api._openPicker(inp, 'date');
       if (!dd) return { ok: false, why: '日历面板没弹出来' };
 
@@ -1259,14 +1357,34 @@
                why: got === text ? '' : '点了日期但值变成「' + got + '」' };
     },
 
-    // 时间：必须在面板里选小时、分钟，然后点「确定」
+    // 时间：先走「面板里选时分 → 点确定」；不行再改组件值；还不行就往输入框里敲
     async setScheduleTime(text) {
       const ins = api._schedInputs();
       const inp = ins.time;
       if (!inp) return { ok: false, why: '找不到时间输入框' };
-      const m = String(text || '').match(/^(\d{1,2}):(\d{2})$/);
-      if (!m) return { ok: false, why: '时间格式必须是 HH:mm（收到 ' + text + '）' };
+      if (!/^\d{1,2}:\d{2}$/.test(String(text || '')))
+        return { ok: false, why: '时间格式必须是 HH:mm（收到 ' + text + '）' };
 
+      const tries = [];
+      const r1 = await api._timeByPanel(inp, text);
+      if (r1.ok) return r1;
+      tries.push('时间面板：' + r1.why);
+
+      const r2 = api._pickerByModel(inp, 'time', text);
+      await sleepMs(180);
+      if (r2.ok && (inp.value || '').trim() === text) return { ok: true, via: 'model', got: text };
+      tries.push('改组件值：' + (r2.ok ? '显示没刷新（' + (inp.value || '') + '）' : r2.why));
+
+      const r3 = api._pickerByTyping(inp, text);
+      await sleepMs(200);
+      if (r3.ok && (inp.value || '').trim() === text) return { ok: true, via: 'typing', got: text };
+      tries.push('输入框输入：' + (r3.ok ? '显示没刷新（' + (inp.value || '') + '）' : r3.why));
+
+      return { ok: false, got: (inp.value || '').trim(), why: tries.join('；') };
+    },
+
+    async _timeByPanel(inp, text) {
+      const m = String(text || '').match(/^(\d{1,2}):(\d{2})$/);
       const dd = await api._openPicker(inp, 'time');
       if (!dd) return { ok: false, why: '时间面板没弹出来' };
 

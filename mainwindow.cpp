@@ -50,7 +50,7 @@ namespace {
 // 为什么要这行：首次运行会把内置脚本导出一份到 exe 目录（方便现场改选择器不用重编），
 // 但升级 exe 之后这份旧副本会一直在，并优先于新内置脚本被注入 ——
 // 表现就是「客户端明明进了书，软件还是说读不到章节目录」（旧脚本里没有 chapterList）。
-constexpr int kSiteJsVer = 26;
+constexpr int kSiteJsVer = 27;
 
 QByteArray builtinSiteScript()
 {
