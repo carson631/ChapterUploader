@@ -2,14 +2,17 @@
 #define MAINWINDOW_H
 
 #include "chapterstore.h"
+#include "publishworker.h"
 #include "uploadworker.h"
 
 #include <QMainWindow>
+#include <QDateTime>
 #include <QJsonArray>
 
 class CdpClient;
 class QCheckBox;
 class QComboBox;
+class QDateEdit;
 class QFrame;
 class QLabel;
 class QLineEdit;
@@ -18,6 +21,7 @@ class QProgressBar;
 class QPushButton;
 class QSpinBox;
 class QTableWidget;
+class QTimeEdit;
 
 class MainWindow : public QMainWindow
 {
@@ -33,6 +37,7 @@ private slots:
     void enableAndLaunchClient();
     void toggleConnect();
     void startRun();
+    void startPublish();     // 定时发布草稿（单独一条链路，逻辑在 PublishWorker 里）
     void stopRun();
     void dumpPage();
     void runCustomJs();
@@ -48,12 +53,16 @@ private:
     void flushLog();                   // 把攒着的日志一次性刷进控件
     void setConnUi(bool connected, const QString &detail);
     bool isDraftMode() const;          // 模式：上传新章 / 校对已有草稿
+    bool isPublishMode() const;        // 模式：定时发布草稿
     void updateModeUi();
     void injectSiteScript();
     void revertClientPatch();
     void updateRunUi();
     void refreshRangeBounds();
+    void applyTableHeaders();          // 表头跟随模式（发布模式第二列是时间）
     void rebuildTable();               // 表格跟随模式：草稿=区间章节，上传=本地 txt
+    QDateTime scheduleStart() const;   // 定时发布的起始时间（已过去则顺延到明天）
+    void refreshScheduleHint();        // 左侧那行「每天 N 章 / 预计到哪天」
     void saveSettings();
     void loadSettings();
 
@@ -66,6 +75,7 @@ private:
     ChapterStore  m_store;
     CdpClient    *m_cdp = nullptr;
     UploadWorker *m_worker = nullptr;
+    PublishWorker *m_pub = nullptr;
 
     // 顶部
     QLineEdit *m_exePath = nullptr;
@@ -92,6 +102,15 @@ private:
     QPushButton    *m_startBtn = nullptr;
     QPushButton    *m_stopBtn = nullptr;
     QProgressBar   *m_progress = nullptr;
+
+    // 定时发布专用
+    QFrame         *m_schedCard = nullptr;
+    QDateEdit      *m_startDate = nullptr;
+    QTimeEdit      *m_startTime = nullptr;
+    QSpinBox       *m_perDay = nullptr;
+    QSpinBox       *m_gapMin = nullptr;
+    QCheckBox      *m_dryRun = nullptr;
+    QLabel         *m_schedHint = nullptr;
 
     // 右侧
     QPlainTextEdit *m_log = nullptr;

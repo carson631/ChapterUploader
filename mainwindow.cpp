@@ -7,6 +7,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDateEdit>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -18,6 +19,7 @@
 #include <QGraphicsDropShadowEffect>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHash>
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QJsonArray>
@@ -33,6 +35,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QSpinBox>
+#include <QTimeEdit>
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTimer>
@@ -80,6 +83,26 @@ QLabel *fieldLabel(const QString &text)
     return l;
 }
 
+// 定时发布排期：第 idx 章（从 0 数）落在「起始时间 + (idx/每天章数) 天 + (idx%每天章数)×间隔分钟」
+QDateTime slotTime(const QDateTime &start, int idx, int perDay, int gapMin)
+{
+    const int per = qMax(1, perDay);
+    const int day = idx / per;
+    const int slot = idx % per;
+    return QDateTime(start.date().addDays(day),
+                     start.time().addSecs(qint64(slot) * qMax(0, gapMin) * 60));
+}
+
+// chapterStore 的 status：1=草稿 2=已发布 5=已定时 7=回收站
+QString statusLabel(const QString &st)
+{
+    if (st == QLatin1String("1")) return QStringLiteral("草稿");
+    if (st == QLatin1String("2")) return QStringLiteral("已发布");
+    if (st == QLatin1String("5")) return QStringLiteral("已定时发布");
+    if (st == QLatin1String("7")) return QStringLiteral("回收站");
+    return st.isEmpty() ? QStringLiteral("目录里没有") : QStringLiteral("状态 %1").arg(st);
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
@@ -92,6 +115,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_cdp    = new CdpClient(this);
     m_worker = new UploadWorker(m_cdp, this);
+    m_pub    = new PublishWorker(m_cdp, this);
 
     // 日志批量刷新：跑校对时一秒可能蹦十几行，逐条 appendPlainText 会让控件反复重排，
     // 攒 120ms 一批再插，界面和状态机都不被日志拖慢（内容、顺序完全不变）
@@ -125,7 +149,7 @@ MainWindow::MainWindow(QWidget *parent)
     appSub->setObjectName(QStringLiteral("appSub"));
     hl->addWidget(appSub);
     hl->addSpacing(4);
-    auto *ver = new QLabel(QStringLiteral("v1.0.1"));
+    auto *ver = new QLabel(QStringLiteral("v1.1.0"));
     ver->setObjectName(QStringLiteral("verChip"));
     hl->addWidget(ver);
     root->addWidget(header);
@@ -211,6 +235,30 @@ MainWindow::MainWindow(QWidget *parent)
         }
     });
 
+    // ---- 定时发布 ----
+    connect(m_pub, &PublishWorker::log, this, &MainWindow::log);
+    connect(m_pub, &PublishWorker::itemStatus, this, [this](int index, const QString &status) {
+        const int row = index;                       // 发布模式的表格就是按计划重建的，行号即下标
+        if (row >= 0 && row < m_table->rowCount() && m_table->item(row, 3))
+            m_table->item(row, 3)->setText(status);
+    });
+    connect(m_pub, &PublishWorker::itemDone, this, [this](int index, bool ok, const QString &) {
+        const int row = index;
+        if (row >= 0 && row < m_table->rowCount() && m_table->item(row, 3)) {
+            m_table->item(row, 3)->setText(ok ? QStringLiteral("已定时") : QStringLiteral("失败"));
+            m_table->selectRow(row);
+        }
+        m_progress->setValue(m_progress->value() + 1);
+        statusBar()->showMessage(QStringLiteral("进度 %1 / %2")
+                                     .arg(m_progress->value()).arg(m_progress->maximum()));
+    });
+    connect(m_pub, &PublishWorker::finished, this, [this](int ok, int fail) {
+        m_running = false;
+        updateRunUi();
+        log(QStringLiteral("=== 结束：成功 %1，失败 %2 ===").arg(ok).arg(fail));
+        flushLog();
+    });
+
     m_autoConnect = new QTimer(this);
     m_autoConnect->setInterval(2500);
     connect(m_autoConnect, &QTimer::timeout, this, [this]() {
@@ -272,6 +320,12 @@ MainWindow::MainWindow(QWidget *parent)
             m_mode->setCurrentIndex(1);
         else if (qEnvironmentVariable("CU_MODE") == QLatin1String("upload"))
             m_mode->setCurrentIndex(0);
+        else if (qEnvironmentVariable("CU_MODE") == QLatin1String("publish"))
+            m_mode->setCurrentIndex(2);
+        if (!qEnvironmentVariable("CU_FROM").isEmpty() || !qEnvironmentVariable("CU_TO").isEmpty()) {
+            m_from->setValue(qEnvironmentVariableIntValue("CU_FROM"));
+            m_to->setValue(qEnvironmentVariableIntValue("CU_TO"));
+        }
         const QString shot = qEnvironmentVariable("CU_SHOT");
         if (!shot.isEmpty()) {
             QTimer::singleShot(selfTest * 1000, this, [this, shot]() {
@@ -395,9 +449,12 @@ QWidget *MainWindow::buildLeftPanel()
     m_mode->setObjectName(QStringLiteral("modeCombo"));   // QSS 里做成蓝底强调样式
     m_mode->addItem(QStringLiteral("上传新章"), QStringLiteral("upload"));
     m_mode->addItem(QStringLiteral("校对已有草稿"), QStringLiteral("draft"));
+    m_mode->addItem(QStringLiteral("定时发布草稿"), QStringLiteral("publish"));
     m_mode->setToolTip(QStringLiteral("上传新章：从本地分章 txt 新建章节并写入。\n"
                                       "校对已有草稿：不动标题正文，只把侧栏里已有的章节逐章点开、\n"
-                                      "跑「错别字 → 病句」检测并把建议逐条改掉。"));
+                                      "跑「错别字 → 病句」检测并把建议逐条改掉。\n"
+                                      "定时发布草稿：进入作品的「草稿」列表，按区间逐章点「发布」、\n"
+                                      "勾「定时发布」并填好日期时间，最后点「定时发布」。"));
     m_mode->setMinimumWidth(150);
     rangeRow->addWidget(m_mode);
     rangeRow->addSpacing(10);
@@ -448,6 +505,59 @@ QWidget *MainWindow::buildLeftPanel()
 
     v->addWidget(optCard);
 
+    // ---- 定时发布排期（只在「定时发布草稿」模式可用）----
+    m_schedCard = new QFrame;
+    m_schedCard->setObjectName(QStringLiteral("card"));
+    auto *scV = new QVBoxLayout(m_schedCard);
+    scV->setContentsMargins(14, 10, 14, 10);
+    scV->setSpacing(8);
+
+    auto *schedRow = new QHBoxLayout;
+    schedRow->setSpacing(8);
+    schedRow->addWidget(fieldLabel(QStringLiteral("起始")));
+    m_startDate = new QDateEdit(QDate::currentDate());
+    m_startDate->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    m_startDate->setCalendarPopup(true);
+    m_startDate->setToolTip(QStringLiteral("第一章的发布日期（格式 2026-11-06）。\n"
+                                           "如果这个时间点已经过去，会自动顺延到第二天同一时间。"));
+    schedRow->addWidget(m_startDate);
+    m_startTime = new QTimeEdit(QTime(19, 0));
+    m_startTime->setDisplayFormat(QStringLiteral("HH:mm"));
+    m_startTime->setToolTip(QStringLiteral("每天第一本的发布时间（格式 19:00）"));
+    schedRow->addWidget(m_startTime);
+
+    schedRow->addSpacing(10);
+    schedRow->addWidget(new QLabel(QStringLiteral("每天")));
+    m_perDay = new QSpinBox;
+    m_perDay->setRange(1, 20);
+    m_perDay->setValue(3);
+    m_perDay->setSuffix(QStringLiteral(" 章"));
+    m_perDay->setToolTip(QStringLiteral("每天发几章（默认 3 章）"));
+    schedRow->addWidget(m_perDay);
+    schedRow->addWidget(new QLabel(QStringLiteral("间隔")));
+    m_gapMin = new QSpinBox;
+    m_gapMin->setRange(0, 240);
+    m_gapMin->setValue(5);
+    m_gapMin->setSuffix(QStringLiteral(" 分钟"));
+    m_gapMin->setToolTip(QStringLiteral("同一天相邻两章隔几分钟（默认 5 分钟）"));
+    schedRow->addWidget(m_gapMin);
+    schedRow->addStretch();
+    scV->addLayout(schedRow);
+
+    auto *schedRow2 = new QHBoxLayout;
+    schedRow2->setSpacing(10);
+    m_dryRun = new QCheckBox(QStringLiteral("演练：只填表不提交"));
+    m_dryRun->setToolTip(QStringLiteral("逐章打开发布弹窗、勾定时发布、选好日期时间，然后关掉不点「定时发布」。\n"
+                                        "第一次用建议先演练一遍，确认日志里的日期时间和预期一致。"));
+    schedRow2->addWidget(m_dryRun);
+    m_schedHint = new QLabel;
+    m_schedHint->setProperty("role", "muted");
+    m_schedHint->setWordWrap(true);
+    schedRow2->addWidget(m_schedHint, 1);
+    scV->addLayout(schedRow2);
+
+    v->addWidget(m_schedCard);
+
     connect(m_mode, &QComboBox::currentIndexChanged, this, [this]() {
         updateModeUi();
         refreshRangeBounds();
@@ -455,10 +565,25 @@ QWidget *MainWindow::buildLeftPanel()
     });
     // 草稿模式下改区间就实时重建表格，一眼能看到要跑哪些章
     connect(m_from, &QSpinBox::valueChanged, this, [this]() {
-        if (isDraftMode()) rebuildTable();
+        if (isDraftMode() || isPublishMode()) rebuildTable();
     });
     connect(m_to, &QSpinBox::valueChanged, this, [this]() {
-        if (isDraftMode()) rebuildTable();
+        if (isDraftMode() || isPublishMode()) rebuildTable();
+    });
+    // 排期参数一改，预览表跟着变
+    for (QSpinBox *sp : {m_perDay, m_gapMin}) {
+        connect(sp, &QSpinBox::valueChanged, this, [this]() {
+            refreshScheduleHint();
+            if (isPublishMode()) rebuildTable();
+        });
+    }
+    connect(m_startDate, &QDateEdit::dateChanged, this, [this]() {
+        refreshScheduleHint();
+        if (isPublishMode()) rebuildTable();
+    });
+    connect(m_startTime, &QTimeEdit::timeChanged, this, [this]() {
+        refreshScheduleHint();
+        if (isPublishMode()) rebuildTable();
     });
 
     // 章节表
@@ -574,10 +699,12 @@ void MainWindow::reloadChapters()
             .arg(list.size()).arg(list.first().no).arg(list.last().no));
 }
 
-// 表格按当前模式重建：草稿模式列「区间里的每个章节号」，上传模式列本地 txt
+// 表格按当前模式重建：草稿模式列「区间里的每个章节号」，上传模式列本地 txt，
+// 发布模式列「区间 + 各自排到的时间」
 void MainWindow::rebuildTable()
 {
     m_table->setRowCount(0);
+    applyTableHeaders();
 
     if (isDraftMode()) {
         const int lo = m_from->value();
@@ -595,6 +722,28 @@ void MainWindow::rebuildTable()
         return;
     }
 
+    if (isPublishMode()) {
+        // 预览：按区间排出时间（真正开始时还会去掉已发布/已定时的章，时间随之重排）
+        const int lo = m_from->value();
+        const int hi = m_to->value();
+        if (lo > hi)
+            return;
+        const QDateTime start = scheduleStart();
+        const int per = m_perDay->value();
+        const int gap = m_gapMin->value();
+        const int n = hi - lo + 1;
+        m_table->setRowCount(n);
+        for (int i = 0; i < n; ++i) {
+            const QDateTime when = slotTime(start, i, per, gap);
+            m_table->setItem(i, 0, new QTableWidgetItem(QString::number(lo + i)));
+            m_table->setItem(i, 1, new QTableWidgetItem(when.toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
+            m_table->setItem(i, 2, new QTableWidgetItem(QStringLiteral("（草稿）")));
+            m_table->setItem(i, 3, new QTableWidgetItem(QStringLiteral("待发布")));
+        }
+        refreshScheduleHint();
+        return;
+    }
+
     if (m_store.count() == 0)
         return;
     const auto &list = m_store.chapters();
@@ -608,39 +757,124 @@ void MainWindow::rebuildTable()
     }
 }
 
+// 发布模式第二列是「定时时间」，其他模式是标题
+void MainWindow::applyTableHeaders()
+{
+    auto *h = m_table->horizontalHeader();
+    if (isPublishMode()) {
+        m_table->setHorizontalHeaderLabels({QStringLiteral("编号"), QStringLiteral("定时时间"),
+                                            QStringLiteral("标题"), QStringLiteral("状态")});
+        h->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        h->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        h->setSectionResizeMode(2, QHeaderView::Stretch);
+        h->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        return;
+    }
+    m_table->setHorizontalHeaderLabels({QStringLiteral("编号"), QStringLiteral("标题"),
+                                        QStringLiteral("字数"), QStringLiteral("状态")});
+    h->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    h->setSectionResizeMode(1, QHeaderView::Stretch);
+    h->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    h->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+}
+
 bool MainWindow::isDraftMode() const
 {
     return m_mode && m_mode->currentData().toString() == QLatin1String("draft");
 }
 
-// 两种模式能改的选项不一样：草稿模式不动标题/正文，所以上传相关项全禁用
+bool MainWindow::isPublishMode() const
+{
+    return m_mode && m_mode->currentData().toString() == QLatin1String("publish");
+}
+
+// 起始时间已经过去就顺延到第二天同一时间：平台不接受过去的时间点
+QDateTime MainWindow::scheduleStart() const
+{
+    QDateTime start(m_startDate->date(), m_startTime->time());
+    const QDateTime now = QDateTime::currentDateTime();
+    while (start <= now.addSecs(60))
+        start = start.addDays(1);
+    return start;
+}
+
+void MainWindow::refreshScheduleHint()
+{
+    if (!m_schedHint || !m_perDay || !m_gapMin || !m_from || !m_to)
+        return;
+    if (!isPublishMode()) {
+        m_schedHint->setText(QStringLiteral("仅「定时发布草稿」模式使用"));
+        return;
+    }
+    const int lo = m_from->value();
+    const int hi = m_to->value();
+    if (lo > hi) {
+        m_schedHint->setText(QStringLiteral("起止章号反了"));
+        return;
+    }
+    const QDateTime start = scheduleStart();
+    const int n = hi - lo + 1;
+    const QDateTime last = slotTime(start, n - 1, m_perDay->value(), m_gapMin->value());
+    const int days = (n + m_perDay->value() - 1) / qMax(1, m_perDay->value());
+
+    QStringList day1;
+    const int per = m_perDay->value();
+    for (int i = 0; i < per; ++i)
+        day1 << slotTime(start, i, per, m_gapMin->value()).toString(QStringLiteral("HH:mm"));
+
+    QString txt = QStringLiteral("共 %1 章 · 每天 %2 章（%3）· %4 天发完 · 最后一章 %5")
+                      .arg(n).arg(per).arg(day1.join(QStringLiteral(" / ")))
+                      .arg(days)
+                      .arg(last.toString(QStringLiteral("yyyy-MM-dd HH:mm")));
+    if (QDateTime(QDate(m_startDate->date()), m_startTime->time()) <= QDateTime::currentDateTime())
+        txt += QStringLiteral("　·　起始时间已过，自动顺延到 %1")
+                   .arg(start.toString(QStringLiteral("yyyy-MM-dd")));
+    m_schedHint->setText(txt);
+}
+
+// 三种模式能改的选项不一样：草稿模式不动标题/正文，发布模式只控制排期
 void MainWindow::updateModeUi()
 {
     const bool draft = isDraftMode();
+    const bool publish = isPublishMode();
     const bool idle  = !m_running;
+    const bool plain = !draft && !publish;        // 上传新章
 
-    if (m_rangeTag)
-        m_rangeTag->setText(draft ? QStringLiteral("校对范围：第") : QStringLiteral("上传范围：第"));
+    if (m_rangeTag) {
+        m_rangeTag->setText(draft    ? QStringLiteral("校对范围：第")
+                            : publish ? QStringLiteral("发布范围：第")
+                                      : QStringLiteral("上传范围：第"));
+    }
     if (m_dirCard)
-        m_dirCard->setEnabled(!draft && idle);
+        m_dirCard->setEnabled(plain && idle);
     if (m_proofread) {
         if (draft)
             m_proofread->setChecked(true);      // 草稿模式必校对
-        m_proofread->setEnabled(!draft && idle);
+        m_proofread->setEnabled(plain && idle);
     }
-    if (m_skipExisting)   m_skipExisting->setEnabled(!draft && idle);
-    if (m_titleWithNo)    m_titleWithNo->setEnabled(!draft && idle);
-    if (m_titleUseStem)   m_titleUseStem->setEnabled(!draft && idle);
-    if (m_finishMode)     m_finishMode->setEnabled(!draft && idle);
+    if (m_skipExisting)   m_skipExisting->setEnabled(plain && idle);
+    if (m_titleWithNo)    m_titleWithNo->setEnabled(plain && idle);
+    if (m_titleUseStem)   m_titleUseStem->setEnabled(plain && idle);
+    if (m_finishMode)     m_finishMode->setEnabled(plain && idle);
     if (m_mode)           m_mode->setEnabled(idle);
+
+    if (m_schedCard)      m_schedCard->setEnabled(publish && idle);
+    for (QWidget *w : {static_cast<QWidget *>(m_startDate), static_cast<QWidget *>(m_startTime),
+                       static_cast<QWidget *>(m_perDay), static_cast<QWidget *>(m_gapMin),
+                       static_cast<QWidget *>(m_dryRun)}) {
+        if (w) w->setEnabled(publish && idle);
+    }
+    refreshScheduleHint();
+
     if (m_startBtn)
-        m_startBtn->setText(draft ? QStringLiteral("开始校对草稿")
-                                  : QStringLiteral("开始上传"));
+        m_startBtn->setText(draft   ? QStringLiteral("开始校对草稿")
+                            : publish ? QStringLiteral("开始定时发布")
+                                      : QStringLiteral("开始上传"));
 }
 
 void MainWindow::refreshRangeBounds()
 {
-    if (isDraftMode()) {                 // 草稿模式不受本地目录限制，范围自己填
+    if (isDraftMode() || isPublishMode()) {   // 这两种模式不受本地目录限制，范围自己填
         m_from->setRange(1, 99999);
         m_to->setRange(1, 99999);
         return;
@@ -769,6 +1003,10 @@ void MainWindow::startRun()
 {
     if (m_running)
         return;
+    if (isPublishMode()) {
+        startPublish();
+        return;
+    }
     if (!m_connected) {
         QMessageBox::information(this, QStringLiteral("还没连接"),
                                  QStringLiteral("先启动客户端并点「连接页面」，连上后才能操作页面。"));
@@ -869,8 +1107,146 @@ void MainWindow::startRun()
 void MainWindow::stopRun()
 {
     m_worker->stop();
+    m_pub->stop();
     m_running = false;
     updateRunUi();
+}
+
+// 定时发布：先读客户端的全量目录，只排「草稿」章（已发布 / 已定时 / 回收站都跳过），
+// 再按「每天 N 章、间隔 M 分钟」把时间算好，交给 PublishWorker 逐章执行。
+void MainWindow::startPublish()
+{
+    if (!m_connected) {
+        QMessageBox::information(this, QStringLiteral("还没连接"),
+                                 QStringLiteral("先启动客户端并点「连接页面」，连上后才能发布。"));
+        return;
+    }
+    const int lo = m_from->value();
+    const int hi = m_to->value();
+    if (lo > hi) {
+        QMessageBox::warning(this, QStringLiteral("范围不对"),
+                             QStringLiteral("起始章不能大于结束章。"));
+        return;
+    }
+    if (m_bookName->currentText().trimmed().isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("还没有书名"),
+                                 QStringLiteral("先在左上角「作品」里填/选一本书，再点「进入作品」。"));
+        return;
+    }
+
+    const int per = m_perDay->value();
+    const int gap = m_gapMin->value();
+    const bool dry = m_dryRun->isChecked();
+    const QDateTime start = scheduleStart();
+    if (QDateTime(QDate(m_startDate->date()), m_startTime->time()) <= QDateTime::currentDateTime()) {
+        log(QStringLiteral("起始时间已过，自动顺延到 %1 %2")
+                .arg(start.toString(QStringLiteral("yyyy-MM-dd")),
+                     start.toString(QStringLiteral("HH:mm"))));
+    }
+
+    m_progress->setRange(0, 0);
+    statusBar()->showMessage(QStringLiteral("读取章节目录…"));
+
+    m_cdp->evaluate(QStringLiteral("__yw.chapterList()"),
+                    [this, lo, hi, per, gap, dry, start](bool ok, const QJsonValue &v, const QString &err) {
+        QHash<int, QString> titles, status;
+        if (ok && v.isArray()) {
+            for (const QJsonValue &x : v.toArray()) {
+                const QJsonObject o = x.toObject();
+                const int no = o.value(QStringLiteral("no")).toInt();
+                titles.insert(no, o.value(QStringLiteral("title")).toString());
+                status.insert(no, o.value(QStringLiteral("status")).toString());
+            }
+        }
+        const bool haveIndex = !titles.isEmpty();
+        if (!haveIndex) {
+            // 没目录就没法判断哪些是草稿、该排哪天，宁可停下也不乱发
+            m_progress->setRange(0, 1);
+            m_progress->setValue(0);
+            statusBar()->showMessage(QStringLiteral("就绪"));
+            log(QStringLiteral("✗ 读不到客户端章节目录（%1）")
+                    .arg(ok ? QStringLiteral("目录为空，可能还停在书架页")
+                            : err));
+            QMessageBox::information(
+                this, QStringLiteral("先进入作品"),
+                QStringLiteral("读不到这本书的章节目录。\n\n"
+                               "请先在左上角点「进入作品」，等客户端切到这本书的写作页"
+                               "（侧栏能看到「草稿/已发布」两个标签），再点「开始定时发布」。"));
+            return;
+        }
+
+        QVector<PublishItem> plan;
+        QStringList skipped;
+        int idx = 0;
+        for (int no = lo; no <= hi; ++no) {
+            const QString st = status.value(no);
+            if (st.isEmpty()) {
+                skipped << QStringLiteral("第%1章（目录里没有）").arg(no);
+                continue;
+            }
+            if (st != QLatin1String("1")) {          // 只发 status=1 的草稿
+                skipped << QStringLiteral("第%1章（%2）").arg(no).arg(statusLabel(st));
+                continue;
+            }
+            PublishItem it;
+            it.no = no;
+            it.title = titles.value(no);
+            it.when = slotTime(start, idx++, per, gap);
+            plan.append(it);
+        }
+
+        if (!skipped.isEmpty()) {
+            const int keep = 6;
+            QString list = skipped.mid(0, keep).join(QStringLiteral("、"));
+            if (skipped.size() > keep)
+                list += QStringLiteral("…（共 %1 章）").arg(skipped.size());
+            log(QStringLiteral("跳过 %1 章非草稿：%2").arg(skipped.size()).arg(list));
+        }
+        if (plan.isEmpty()) {
+            m_progress->setRange(0, 1);
+            m_progress->setValue(0);
+            statusBar()->showMessage(QStringLiteral("就绪"));
+            QMessageBox::information(this, QStringLiteral("没有可发布的草稿"),
+                                     QStringLiteral("第 %1 ~ %2 章里没有「草稿」状态的章节"
+                                                    "（已发布/已定时/回收站都会跳过）。")
+                                         .arg(lo).arg(hi));
+            return;
+        }
+
+        // 表格改成「实际计划」
+        m_table->setRowCount(plan.size());
+        applyTableHeaders();
+        for (int i = 0; i < plan.size(); ++i) {
+            const PublishItem &it = plan.at(i);
+            m_table->setItem(i, 0, new QTableWidgetItem(QString::number(it.no)));
+            m_table->setItem(i, 1, new QTableWidgetItem(it.when.toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
+            m_table->setItem(i, 2, new QTableWidgetItem(it.title.isEmpty()
+                                                            ? QStringLiteral("（草稿）") : it.title));
+            m_table->setItem(i, 3, new QTableWidgetItem(QStringLiteral("待发布")));
+        }
+
+        log(QStringLiteral("发布计划：%1 章，%2 起，每天 %3 章、间隔 %4 分钟，最后一章 %5%6")
+                .arg(plan.size())
+                .arg(start.toString(QStringLiteral("yyyy-MM-dd HH:mm")))
+                .arg(per).arg(gap)
+                .arg(plan.last().when.toString(QStringLiteral("yyyy-MM-dd HH:mm")))
+                .arg(dry ? QStringLiteral("（演练模式，不提交）") : QString()));
+
+        PublishOptions opt;
+        opt.bookName = m_bookName->currentText().trimmed();
+        opt.bookCbid = m_bookName->currentData().toString();
+        const int bi = m_bookName->currentIndex();
+        if (bi < 0 || m_bookName->itemText(bi) != m_bookName->currentText())
+            opt.bookCbid.clear();
+        opt.dryRun = dry;
+
+        m_progress->setRange(0, plan.size());
+        m_progress->setValue(0);
+        m_running = true;
+        updateRunUi();
+        m_pub->setPlan(plan);
+        m_pub->start(opt);
+    });
 }
 
 void MainWindow::dumpPage()
@@ -1170,6 +1546,7 @@ void MainWindow::closeEvent(QCloseEvent *e)
     flushLog();
     saveSettings();
     m_worker->stop();
+    m_pub->stop();
     m_cdp->close();
     QMainWindow::closeEvent(e);
 }
@@ -1231,6 +1608,11 @@ void MainWindow::saveSettings()
     s.setValue(QStringLiteral("ui/bookName"), m_bookName->currentText());
     s.setValue(QStringLiteral("ui/skipExisting"), m_skipExisting->isChecked());
     s.setValue(QStringLiteral("ui/mode"), m_mode->currentIndex());
+    s.setValue(QStringLiteral("pub/date"), m_startDate->date());
+    s.setValue(QStringLiteral("pub/time"), m_startTime->time());
+    s.setValue(QStringLiteral("pub/perDay"), m_perDay->value());
+    s.setValue(QStringLiteral("pub/gapMin"), m_gapMin->value());
+    s.setValue(QStringLiteral("pub/dryRun"), m_dryRun->isChecked());
 }
 
 void MainWindow::loadSettings()
@@ -1245,6 +1627,12 @@ void MainWindow::loadSettings()
     m_bookName->setEditText(s.value(QStringLiteral("ui/bookName")).toString());
     m_skipExisting->setChecked(s.value(QStringLiteral("ui/skipExisting"), true).toBool());
     m_mode->setCurrentIndex(s.value(QStringLiteral("ui/mode"), 0).toInt());
+
+    m_startDate->setDate(s.value(QStringLiteral("pub/date"), QDate::currentDate()).toDate());
+    m_startTime->setTime(s.value(QStringLiteral("pub/time"), QTime(19, 0)).toTime());
+    m_perDay->setValue(s.value(QStringLiteral("pub/perDay"), 3).toInt());
+    m_gapMin->setValue(s.value(QStringLiteral("pub/gapMin"), 5).toInt());
+    m_dryRun->setChecked(s.value(QStringLiteral("pub/dryRun"), true).toBool());   // 首次默认演练，安全
 
     if (!m_srcDir->text().isEmpty() && QFileInfo::exists(m_srcDir->text()))
         QTimer::singleShot(0, this, [this]() { reloadChapters(); });

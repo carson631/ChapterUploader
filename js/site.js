@@ -8,7 +8,7 @@
 //   一键改全部  button.modify-all
 //   编辑器      TinyMCE（inline），window.tinymce.activeEditor
 (function () {
-  if (window.__yw && window.__yw.ver >= 24) return 'cached';
+  if (window.__yw && window.__yw.ver >= 25) return 'cached';
 
   const txt = el => (el ? (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim() : '');
 
@@ -276,7 +276,7 @@
   const sleepMs = ms => new Promise(r => setTimeout(r, ms));
 
   const api = {
-    ver: 24,
+    ver: 25,
     _volCount: 0,        // 上次「全展开」时数到的分卷数
     _volAllOpen: false,  // 分卷是否已全部展开（避免每次都收起再展开，白折腾侧栏）
 
@@ -1063,6 +1063,276 @@
       if (!el) return { ok: false };
       click(el);
       return { ok: true, text: txt(el) };
+    },
+
+    // ---------- 定时发布 ----------
+    // 流程（客户端 5.24.0 实测）：
+    //   左侧「草稿」tab（button.action_text2）→ 点开某章 → 右上角 #btn-group-chapter 的「发布」
+    //   → 弹窗「确认章节信息」→ 打开「定时发布」开关 → 日期/时间 → 点「定时发布」
+    // 要点：日期、时间都必须在弹出的面板里点选才生效；
+    //   直接往输入框里写 value 只会改显示，组件内部状态不变，提交时还是旧时间（用户实测）。
+
+    // 侧栏「草稿 / 已发布」两个 tab
+    draftTab() {
+      const tabs = [...document.querySelectorAll('button.action_text2')];
+      const d = tabs.find(b => txt(b) === '草稿');
+      const p = tabs.find(b => txt(b) === '已发布');
+      return { found: !!d,
+               active: d ? d.getAttribute('data-active') === 'true' : false,
+               publishedActive: p ? p.getAttribute('data-active') === 'true' : false };
+    },
+
+    // 切到「草稿」列表：发布前必须，否则侧栏里是已发布章
+    async ensureDraftTab() {
+      const st = api.draftTab();
+      if (!st.found) return { ok: false, why: '侧栏里没有「草稿」标签' };
+      if (st.active) return { ok: true, active: true, already: true };
+      const d = [...document.querySelectorAll('button.action_text2')].find(b => txt(b) === '草稿');
+      click(d);
+      await api._waitFor(() => api.draftTab().active, 3000);
+      const now = api.draftTab();
+      return { ok: now.active, active: now.active, already: false };
+    },
+
+    // 全量目录 + 状态（不依赖侧栏渲染）。
+    // status：1=草稿 2=已发布 5=已定时发布 7=回收站
+    chapterList() {
+      try {
+        const app = document.querySelector('#app');
+        const pinia = app && app.__vue_app__ && app.__vue_app__.config.globalProperties.$pinia;
+        const st = pinia && pinia.state && pinia.state.value;
+        const cs = st && st.chapterStore && st.chapterStore.ChapterState;
+        const list = cs && cs.list;
+        if (!Array.isArray(list)) return null;
+        const out = [];
+        list.forEach(v => (v.chapters || []).forEach(c => {
+          const t = String(c.chaptertitle || '').trim();
+          const m = t.match(/^第\s*(\d+)\s*章/);
+          if (!m) return;
+          out.push({
+            no: parseInt(m[1], 10), title: t,
+            status: String(c.status === undefined ? '' : c.status),
+            words: parseInt(c.actualwords || c.originalwords || 0, 10) || 0,
+            ccid: String(c.CCID || ''), volume: String(v.volumename || ''),
+          });
+        }));
+        out.sort((a, b) => a.no - b.no);
+        return out.length ? out : null;
+      } catch (e) { return null; }
+    },
+
+    chapterStatus(no) {
+      const list = api.chapterList() || [];
+      const c = list.find(x => x.no === no);
+      return c ? { found: true, status: c.status, title: c.title, words: c.words }
+               : { found: false };
+    },
+
+    // 写作页右上角的「发布」（#btn-group-chapter 里的第一个「发布」）。
+    // 已发布章这里是「修改/删除/重置」，所以找不到就说明当前章不是草稿。
+    _publishBtn() {
+      const box = document.querySelector('#btn-group-chapter') || document;
+      return [...box.querySelectorAll('button')].find(b => visible(b) && txt(b) === '发布') || null;
+    },
+
+    openPublishDialog() {
+      const b = api._publishBtn();
+      if (!b) return { ok: false, why: '右上角没有「发布」按钮（这一章可能不是草稿）',
+                       buttons: visibleTexts() };
+      if (b.disabled || b.classList.contains('ant-btn-disabled'))
+        return { ok: false, why: '「发布」按钮是灰的（章节正在保存，或已不是草稿）' };
+      click(b);
+      return { ok: true, text: txt(b) };
+    },
+
+    _publishModal() {
+      const wraps = [...document.querySelectorAll('.ant-modal-wrap')].filter(visible);
+      return wraps.find(w => /确认章节信息/.test(txt(w)))
+             || wraps.find(w => w.querySelector('.publish-item-time')) || null;
+    },
+
+    publishDialog() {
+      const m = api._publishModal();
+      return { open: !!m, title: m ? txt(m.querySelector('.ant-modal-title')) : '' };
+    },
+
+    _schedSwitch() { return document.querySelector('.publish-item-time input[ui="switch"]'); },
+
+    _schedInputs() {
+      const box = document.querySelector('.publish-item-time');
+      if (!box) return {};
+      const ins = [...box.querySelectorAll('.publish_time .ant-picker input')];
+      return { date: ins[0] || null, time: ins[1] || null };
+    },
+
+    // 面板：日期/时间共用 .ant-picker-dropdown，隐藏时带 ant-picker-dropdown-hidden
+    _pickerDropdown(kind) {
+      const list = [...document.querySelectorAll('.ant-picker-dropdown')]
+        .filter(d => visible(d) && !/ant-picker-dropdown-hidden/.test(d.className));
+      if (!kind) return list[0] || null;
+      const want = kind === 'time' ? '.ant-picker-time-panel' : '.ant-picker-date-panel';
+      return list.find(d => d.querySelector(want)) || list[0] || null;
+    },
+
+    // 打开某个输入框的面板。已经开着就直接用（上一次尝试可能没关干净）
+    async _openPicker(inp, kind) {
+      let dd = api._pickerDropdown(kind);
+      if (dd) return dd;
+      inp.focus();
+      try { inp.click(); } catch (e) { }
+      for (let i = 0; i < 6 && !dd; i++) {
+        await sleepMs(120);
+        dd = api._pickerDropdown(kind);
+      }
+      return dd;
+    },
+
+    // 日期：必须是「弹出日历 → 点日期格子」
+    async setScheduleDate(text) {
+      const ins = api._schedInputs();
+      const inp = ins.date;
+      if (!inp) return { ok: false, why: '找不到日期输入框' };
+      const m = String(text || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!m) return { ok: false, why: '日期格式必须是 YYYY-MM-DD（收到 ' + text + '）' };
+
+      const dd = await api._openPicker(inp, 'date');
+      if (!dd) return { ok: false, why: '日历面板没弹出来' };
+
+      // 翻月：面板头写着「2026年 11月」
+      const want = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+      const tgt = want.getFullYear() * 12 + want.getMonth();
+      let cur = -1;
+      for (let i = 0; i < 72; i++) {
+        const view = dd.querySelector('.ant-picker-header-view');
+        const vm = (txt(view) || '').match(/(\d{4})\D+(\d{1,2})/);
+        if (!vm) return { ok: false, why: '读不到日历当前月份（面板结构变了？）' };
+        cur = parseInt(vm[1], 10) * 12 + (parseInt(vm[2], 10) - 1);
+        if (cur === tgt) break;
+        // 超过两个月就点「上/下一年」，否则逐月点，避免来回翻
+        const far = Math.abs(cur - tgt) > 2;
+        const sel = cur < tgt
+          ? (far ? '.ant-picker-header-super-next-btn' : '.ant-picker-header-next-btn')
+          : (far ? '.ant-picker-header-super-prev-btn' : '.ant-picker-header-prev-btn');
+        const btn = dd.querySelector(sel);
+        if (!btn) return { ok: false, why: '日历没有翻页按钮' };
+        click(btn);
+        await sleepMs(90);
+      }
+      if (cur !== tgt) return { ok: false, why: '翻不到 ' + text + ' 所在的月份' };
+
+      const same = [...dd.querySelectorAll('td[title]')]
+        .filter(td => td.getAttribute('title') === text);
+      // 月视图里会顺带渲染上/下月的日子（同一个 title 可能出现两次），优先取当月的
+      const cell = same.find(td => td.classList.contains('ant-picker-cell-in-view')) || same[0];
+      if (!cell) return { ok: false, why: '日历里没有 ' + text + ' 这一天' };
+      click(cell.querySelector('.ant-picker-cell-inner') || cell);
+      await sleepMs(200);
+      const got = (inp.value || '').trim();
+      return { ok: got === text, via: 'calendar', got: got,
+               why: got === text ? '' : '点了日期但值变成「' + got + '」' };
+    },
+
+    // 时间：必须在面板里选小时、分钟，然后点「确定」
+    async setScheduleTime(text) {
+      const ins = api._schedInputs();
+      const inp = ins.time;
+      if (!inp) return { ok: false, why: '找不到时间输入框' };
+      const m = String(text || '').match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return { ok: false, why: '时间格式必须是 HH:mm（收到 ' + text + '）' };
+
+      const dd = await api._openPicker(inp, 'time');
+      if (!dd) return { ok: false, why: '时间面板没弹出来' };
+
+      const cols = [...dd.querySelectorAll('.ant-picker-time-panel-column')];
+      if (cols.length < 2) return { ok: false, why: '时间面板列数不对（' + cols.length + '）' };
+
+      const pick = (col, val) => {
+        const cells = [...col.querySelectorAll('.ant-picker-time-panel-cell')];
+        const want = String(parseInt(val, 10));
+        const hit = cells.find(c => {
+          const t = txt(c.querySelector('.ant-picker-time-panel-cell-inner') || c);
+          return t === want || t === val;
+        });
+        if (!hit) return false;
+        click(hit.querySelector('.ant-picker-time-panel-cell-inner') || hit);
+        return true;
+      };
+
+      if (!pick(cols[0], m[1])) return { ok: false, why: '时间面板里没有 ' + m[1] + ' 点' };
+      await sleepMs(120);
+      if (!pick(cols[1], m[2])) return { ok: false, why: '时间面板里没有 ' + m[2] + ' 分' };
+      await sleepMs(120);
+
+      // 面板底部的「确定」——不点它时间和日期都不生效
+      const ok = dd.querySelector('.ant-picker-ok button')
+              || [...dd.querySelectorAll('button')].find(b => /^(确定|OK)$/.test(txt(b)));
+      if (!ok) return { ok: false, why: '时间面板没有「确定」按钮' };
+      click(ok);
+      await sleepMs(220);
+
+      const got = (inp.value || '').trim();
+      return { ok: got === text, via: 'panel+ok', got: got,
+               why: got === text ? '' : '确定后时间变成「' + got + '」' };
+    },
+
+    // 开关 + 日期 + 时间一次做完；返回值交给 C++ 复核（绝不带着未确认的时间提交）
+    async prepareSchedule(dateStr, timeStr) {
+      const sw = api._schedSwitch();
+      if (!sw) return { ok: false, why: '发布弹窗里没有「定时发布」开关' };
+      if (!sw.checked) {
+        sw.click();
+        await sleepMs(150);
+      }
+      if (!api._schedSwitch().checked) return { ok: false, why: '「定时发布」开关没打开' };
+
+      const rd = await api.setScheduleDate(dateStr);
+      if (!rd.ok) return { ok: false, step: 'date', why: rd.why, date: rd.got };
+
+      const rt = await api.setScheduleTime(timeStr);
+      if (!rt.ok) return { ok: false, step: 'time', why: rt.why, time: rt.got };
+
+      const ins = api._schedInputs();
+      return { ok: true, checked: !!api._schedSwitch().checked,
+               date: ins.date ? ins.date.value : '', time: ins.time ? ins.time.value : '',
+               via: rd.via + ' / ' + rt.via };
+    },
+
+    submitSchedule() {
+      const m = api._publishModal();
+      if (!m) return { ok: false, why: '发布弹窗不在了' };
+      const btns = [...m.querySelectorAll('button')].filter(visible);
+      const hit = btns.find(b => /^(定时发布|确认发布|立即发布)$/.test(txt(b)));
+      if (!hit) return { ok: false, why: '弹窗里没有「定时发布」按钮',
+                         buttons: btns.map(txt).filter(Boolean).slice(0, 12) };
+      if (hit.disabled || hit.classList.contains('ant-btn-disabled'))
+        return { ok: false, why: '「' + txt(hit) + '」按钮是灰的（日期时间可能还没选好）' };
+      click(hit);
+      return { ok: true, text: txt(hit) };
+    },
+
+    publishState() {
+      const m = api._publishModal();
+      const msgs = [...document.querySelectorAll('.ant-message-notice-content,.ant-notification-notice-message')]
+        .filter(visible).map(txt).filter(Boolean);
+      return { open: !!m, msgs: msgs.slice(-4) };
+    },
+
+    // 个别情况下提交后会多弹一个「确定」确认框，点掉它
+    clickConfirmIfAsked() {
+      const cand = [...document.querySelectorAll('.ant-modal-confirm-btns .ant-btn-primary, .ant-modal-wrap button')]
+        .filter(visible)
+        .find(b => /^(确定|确认|继续|知道了)$/.test(txt(b)) && !b.closest('.confirm-dialog'));
+      if (!cand) return { ok: false };
+      click(cand);
+      return { ok: true, text: txt(cand) };
+    },
+
+    closePublishDialog() {
+      const m = api._publishModal();
+      if (!m) return { ok: true, already: true };
+      const x = m.querySelector('.ant-modal-close');
+      if (x) { click(x); return { ok: true }; }
+      return { ok: false, why: '弹窗没有关闭按钮' };
     },
 
     // 调试：把页面结构抓下来，方便对选择器

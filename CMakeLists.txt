@@ -17,6 +17,8 @@ qt_add_executable(ChapterUploader
     cdpclient.cpp
     uploadworker.h
     uploadworker.cpp
+    publishworker.h
+    publishworker.cpp
     installpatch.h
     installpatch.cpp
     app.qrc

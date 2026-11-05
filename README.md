@@ -1,17 +1,21 @@
 # ChapterUploader — 起点作家助手章节自动上传
 
-配套「阅文·作家助手」（`yuewenedit.exe`）的分章批量上传工具：从本地分章 txt 目录逐章
-**新建章 → 填标题 → 贴正文 → 校对检测 → 逐条改病句 → 下一章**，中途可停，支持指定章节区间。
+配套「阅文·作家助手」（`yuewenedit.exe`）的分章批量工具，三种模式：
+
+- **上传新章**：从本地分章 txt 目录逐章**新建章 → 填标题 → 贴正文 → 校对检测 → 逐条改病句 → 下一章**
+- **校对已有草稿**：只跑「错别字 → 病句」检测并改建议，不动标题正文
+- **定时发布草稿**：按区间逐章点「发布」→ 勾「定时发布」→ 选日期/时间 → 点「定时发布」，
+  默认**每天 3 章、19:00 起每 5 分钟一章**
 
 ---
 
 ## 下载
 
-最新版在 Releases：[`ChapterUploader v1.0.1`](https://github.com/carson631/ChapterUploader/releases/latest)
+最新版在 Releases：[`ChapterUploader v1.1.0`](https://github.com/carson631/ChapterUploader/releases/latest)
 
 | 文件 | 说明 |
 |---|---|
-| `ChapterUploader-v1.0.1-win64-portable.zip` | **推荐**，解压即用，已带 Qt 6.8 运行库 |
+| `ChapterUploader-v1.1.0-win64-portable.zip` | **推荐**，解压即用，已带 Qt 6.8 运行库 |
 | `ChapterUploader.exe` | 单文件，需自备 Qt 运行库 |
 
 系统要求：Windows 10/11 x64 + 已安装客户端「阅文·作家助手」。
@@ -27,6 +31,10 @@
 **校对已有草稿**（不动标题正文，逐章跑「错别字 → 病句」并改建议）
 
 ![校对已有草稿](docs/ui-draft.png)
+
+**定时发布草稿**（按区间排期，表格里直接看到每章发在哪天几点）
+
+![定时发布](docs/ui-publish.png)
 
 ---
 
@@ -77,6 +85,16 @@ resources/app/cdp-main.js        新增：appendSwitch('remote-debugging-port','
 | 病句改法 | `#editor-body` 上挂的是 `mouseover`：把鼠标移到 `el-word` 上才弹出 `.context-menu.correc-context.grammar-context`，框里 `.context-primary > label` 就是蓝色的建议句，`label.click()` 才会真正替换正文并抹掉这条红线 |
 | 一键全改 | `button.modify-all`（本工具默认逐条点，便于控制） |
 | 结果状态 | 每块自己的小标题：`错别字：检测完成` / `病句：未检测`（识别方式：找文字里只含「错别字」或只含「病句」的叶子节点，把它和最近的「检测」按钮配对） |
+| 「草稿 / 已发布」tab | `button.action_text2`，文字「草稿」「已发布」；当前选中项 `data-active="true"` |
+| 右上角「发布」 | `#btn-group-chapter` 里文字为「发布」的 `button`。已发布章这里是「修改/删除/重置」，没有「发布」 |
+| 发布弹窗 | `.ant-modal-wrap` 里含「确认章节信息」的那层；表单在 `.publish-item-time` |
+| 定时发布开关 | `.publish-item-time input[ui="switch"]`（原生 checkbox，`.click()` 即切换） |
+| 日期输入框 | `.publish-item-time .publish_time .ant-picker input` 第 1 个（`placeholder="请选择日期"`，格式 `YYYY-MM-DD`） |
+| 日期面板 | `.ant-picker-dropdown` → 头部 `.ant-picker-header-view`（`2026年 11月`）→ 翻月 `.ant-picker-header-next-btn` / `-prev-btn`（跨年用 `-super-next-btn` / `-super-prev-btn`）→ 格子 `td[title="2026-11-06"]`，当月格子带 `ant-picker-cell-in-view` |
+| 时间输入框 | 同上的第 2 个（`placeholder="请选择时间"`，格式 `HH:mm`） |
+| 时间面板 | `.ant-picker-time-panel-column`（第 1 列小时、第 2 列分钟）→ `.ant-picker-time-panel-cell-inner`；底部 `.ant-picker-ok button`（「确定」）**必须点，不点不生效** |
+| 提交按钮 | 弹窗底部 `.ant-btn.long-btn`，开关打开时文字是「定时发布」，关闭时是「确认发布」 |
+| 章节状态 | `chapterStore` 里每章的 `status`：`1=草稿 2=已发布 5=已定时发布 7=回收站` |
 
 ---
 
@@ -98,6 +116,37 @@ resources/app/cdp-main.js        新增：appendSwitch('remote-debugging-port','
 
 ---
 
+## 定时发布流程（工具内部按这个顺序走）
+
+| 步骤 | 界面上看到的动作 | 页面侧做的事 |
+|---|---|---|
+| 1 | 进入作品（左上角「进入作品」） | `browserWindowAPI.openBook({CBID})` 打开写作页 |
+| 2 | **切到「草稿」列表** | 点侧栏 `button.action_text2` 里文字为「草稿」的那个 tab（`data-active="true"` 表示已选中） |
+| 3 | 按「发布范围：第 N ~ M 章」逐章定位 | 读 `chapterStore` 全量目录拿 `CCID/CBID` → 改 `location.hash` 跳章 → `draftReady()` 复核标题和字数 |
+| 4 | 点右上角「发布」 | `#btn-group-chapter` 里文字为「发布」的按钮（已发布章这里是「修改/删除」，没有这个按钮就说明不是草稿） |
+| 5 | 弹窗「确认章节信息」→ 勾「定时发布」 | `.publish-item-time input[ui="switch"]`，没勾上就点一下 |
+| 6 | **在日历里点日期** | 点日期输入框 → `.ant-picker-dropdown` 里翻月（`.ant-picker-header-next-btn`）→ 点 `td[title="2026-11-06"]` 中当月那一格 |
+| 7 | **在时间面板选时分并点「确定」** | `.ant-picker-time-panel-column` 第一列点小时、第二列点分钟 → 点 `.ant-picker-ok button` |
+| 8 | 点「定时发布」 | 弹窗底部文字为「定时发布」的主按钮 → 等弹窗关闭 → 用 `chapterStore` 复核 `status == 5`（已定时发布） |
+
+**排期规则**（默认值，界面可改）：
+
+- 每天 `每天章数` 章（默认 **3**），从起始时间的 `每天第 1 章` 开始，后续每章 +`间隔分钟`（默认 **5**）
+  → 19:00 / 19:05 / 19:10
+- 第二天从同一个 `起始时间` 重新开始
+- 只排 `status == 1`（草稿）的章；`2` 已发布、`5` 已定时发布、`7` 回收站都跳过，并在日志里列出来
+- 起始时间已经过去 → 自动顺延到第二天同一时间
+
+> **日期/时间必须在面板里点选**：这两个输入框是 ant-design-vue 的 Picker，直接写 `input.value`
+> 只会改显示，组件内部状态不变，提交时用的还是旧时间。所以脚本走的是「弹面板 → 点格子 → 点确定」，
+> 填完还会把两个输入框的真实值回给程序复核，对不上就重试一次，仍不对就跳过着一条，
+> **绝不会带着没设上的时间提交**。
+
+> 第一次用建议先勾上「演练：只填表不提交」：逐章打开发布弹窗、按真实流程选好日期时间，
+> 核对无误后关掉弹窗不提交。日志里每章会打印「定时发布已填好：2026-11-06 19:05」。
+
+---
+
 ## 首次使用（必须按顺序）
 
 1. **完全退出作家助手**（关窗口不够，托盘图标右键退出；客户端是单实例的，它还在跑就没法带调试端口重启）。
@@ -108,6 +157,8 @@ resources/app/cdp-main.js        新增：appendSwitch('remote-debugging-port','
 6. 选模式：
    - **上传新章**：选章节目录 → 设区间 → 点「开始上传」。
    - **校对已有草稿**：区间填「第 1 章到第 150 章」→ 点「开始校对草稿」。
+   - **定时发布草稿**：先进作品 → 区间填「第 171 章到第 188 章」→ 起始日期/时间填 `2026-11-06` / `19:00`
+     → 点「开始定时发布」。
 
 > 「作品」留空时，上传开始会按章节目录名推导书名（`三国：曹贼的科技与狠活前传_分章txt` → `三国：曹贼的科技与狠活前传`）。
 
@@ -124,6 +175,13 @@ resources/app/cdp-main.js        新增：appendSwitch('remote-debugging-port','
     - 切章不是靠点侧栏条目的：客户端侧栏是「分卷 → 章节」两级虚拟树，第二卷之后的分卷默认**收起**，卷里章节根本没进 DOM，硬滚列表是找不到的。
     - 现在改成读 Pinia 里的 `chapterStore.ChapterState.list`（全量目录，每章带 `CCID/CBID`），直接 `location.hash = '#/chapter/<CBID>/<CCID>'` 跳章：实测第 151/152/300/449/700/1200 章都在 15~300ms 内命中，和点侧栏条目等效（`chapterStore.currentChapter` 会同步更新）。跳完仍由 `draftReady` 复核标题和字数，确认正文真的换了才继续。
     - 万一某个客户端版本读不到这个 store，脚本会退回老办法：先把所有分卷展开（收起 → 卷头聚到列表末尾 → 一次点开），再滚虚拟列表按章号逼近；两条路都不通才报失败，失败信息会带上「目录共 N 章，第 a~b 章」。
+  - `定时发布草稿`：**只发布不写内容**。先把客户端的「草稿」列表切出来，按区间逐章点右上角「发布」→
+    勾「定时发布」→ 在日历里选日期、在时间面板选时分并点「确定」→ 点「定时发布」。
+    默认**每天 3 章、从 19:00 开始每 5 分钟一章**（19:00 / 19:05 / 19:10），第二天再从头来；
+    「每天章数」「间隔分钟」可在排期卡片里改，表格会立刻重算每章的发布时间。
+    - 只排 `status==1`（草稿）的章：已发布、已定时发布、回收站在日志里列出来并跳过
+    - 起始时间已经过去 → 自动顺延到第二天同一时间
+    - 排期卡片里的「演练：只填表不提交」会完整走一遍填表流程但不点「定时发布」，第一次用建议先演练
 - **上传/校对范围**：按章节编号，包含两端；上传模式下有进度记录时会自动从「上次的下一章」开始。
 - **作品（书名）**：左侧最上方，可直接手输，也可点「刷新列表」从客户端书架里选（当前不在书架页时会自动切过去读，读完切回写作页）。下拉项里带着作品的 CBID，开书走客户端自己的 `openBook` IPC，不再依赖封面图是否渲染。
   - **进入作品**：在客户端里点开这本书并切到写作页；已连接就直接进，没连接会先连上再进。
@@ -162,6 +220,7 @@ ChapterUploader/
 ├── chapterstore.*               分章 txt 扫描与解析（编号+章名，UTF-8 BOM）
 ├── cdpclient.*                  DevTools 协议客户端（/json/list + Runtime.evaluate）
 ├── uploadworker.*               逐章状态机（新建→标题→正文→校验→校对→修改→收尾→下一章）
+├── publishworker.*              定时发布状态机（草稿列表→跳章→发布→定时开关→日期/时间→提交→校验）
 ├── installpatch.*               客户端调试端口补丁的开启 / 还原
 ├── js/site.js                   页面侧适配脚本（选择器全在这里，改它不用重编译）
 ├── theme.qss                    浅色主题
