@@ -135,6 +135,9 @@ private:
     bool m_pubDry = false;
     int  m_pubOk = 0;
     int  m_pubFail = 0;
+    // 平台一次最多 21 章：被截掉的那几章，收尾时提示下一批从哪开始
+    int  m_pubCapped = 0;
+    int  m_pubNextFrom = 0;
 
     QFile m_logFile;                // 日志同时落盘，出问题直接把文件发过来就行
 

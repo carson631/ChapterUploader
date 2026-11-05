@@ -51,7 +51,9 @@ namespace {
 // 但升级 exe 之后这份旧副本会一直在，并优先于新内置脚本被注入 ——
 // 表现就是「客户端明明进了书，软件还是说读不到章节目录」（旧脚本里没有 chapterList）。
 constexpr int kSiteJsVer = 29;
-#define CU_APP_VER "1.1.2"
+// 平台限制：番茄一次最多只能排 21 章定时发布，超出的必须等下一批
+constexpr int kMaxPublishPerRun = 21;
+#define CU_APP_VER "1.1.3"
 
 QByteArray builtinSiteScript()
 {
@@ -296,6 +298,12 @@ MainWindow::MainWindow(QWidget *parent)
         m_pubOk = ok;
         m_pubFail = fail;
         log(QStringLiteral("=== 结束：成功 %1，失败 %2 ===").arg(ok).arg(fail));
+        if (m_pubCapped > 0) {
+            log(QStringLiteral("还有 %1 章没排（从第 %2 章起）：等这批发出去后，"
+                               "把范围改成从第 %2 章开始再点一次「开始定时发布」")
+                    .arg(m_pubCapped).arg(m_pubNextFrom));
+            m_pubCapped = 0;
+        }
         if (m_pubDry) {
             log(QStringLiteral("本次是演练：%1 章的日期时间都核对过，但一章都没有真正发布。"
                                "要真发请取消勾选「演练：只填表不提交」。").arg(ok));
@@ -870,19 +878,26 @@ void MainWindow::refreshScheduleHint()
         return;
     }
     const QDateTime start = scheduleStart();
-    const int n = hi - lo + 1;
+    const int want = hi - lo + 1;
+    // 平台一次最多 21 章：提示行按「实际会排多少」算，超出的部分标出来
+    const int n = qMin(want, kMaxPublishPerRun);
+    const int over = qMax(0, want - kMaxPublishPerRun);
     const QDateTime last = slotTime(start, n - 1, m_perDay->value(), m_gapMin->value());
     const int days = (n + m_perDay->value() - 1) / qMax(1, m_perDay->value());
 
     QStringList day1;
     const int per = m_perDay->value();
-    for (int i = 0; i < per; ++i)
+    for (int i = 0; i < qMin(per, n); ++i)
         day1 << slotTime(start, i, per, m_gapMin->value()).toString(QStringLiteral("HH:mm"));
 
-    QString txt = QStringLiteral("共 %1 章 · 每天 %2 章（%3）· %4 天发完 · 最后一章 %5")
-                      .arg(n).arg(per).arg(day1.join(QStringLiteral(" / ")))
-                      .arg(days)
-                      .arg(last.toString(QStringLiteral("yyyy-MM-dd HH:mm")));
+    QString txt = over > 0
+                      ? QStringLiteral("共 %1 章（平台一次最多 %2 章，余下 %3 章留到下一批）")
+                            .arg(n).arg(kMaxPublishPerRun).arg(over)
+                      : QStringLiteral("共 %1 章").arg(n);
+    txt += QStringLiteral("　·　每天 %1 章（%2）· %3 天发完 · 最后一章 %4")
+               .arg(per).arg(day1.join(QStringLiteral(" / ")))
+               .arg(days)
+               .arg(last.toString(QStringLiteral("yyyy-MM-dd HH:mm")));
     if (QDateTime(QDate(m_startDate->date()), m_startTime->time()) <= QDateTime::currentDateTime())
         txt += QStringLiteral("　·　起始时间已过，自动顺延到 %1")
                    .arg(start.toString(QStringLiteral("yyyy-MM-dd")));
@@ -1306,6 +1321,28 @@ void MainWindow::startPublish()
                                                     "（已发布/已定时/回收站都会跳过）。")
                                          .arg(lo).arg(hi));
             return;
+        }
+
+        // 平台硬限制：一次最多排 21 章定时发布，多出来的不能一起提交
+        m_pubCapped = 0;
+        if (plan.size() > kMaxPublishPerRun) {
+            const int dropped = plan.size() - kMaxPublishPerRun;
+            const int nextFrom = plan.at(kMaxPublishPerRun).no;
+            const int nextTo = plan.last().no;
+            plan.resize(kMaxPublishPerRun);
+            m_pubCapped = dropped;
+            m_pubNextFrom = nextFrom;
+            log(QStringLiteral("平台一次最多 %1 章：本次只排前 %1 章，第 %2 ~ %3 章（%4 章）"
+                               "留到下一批（这批发完再点一次即可）")
+                    .arg(kMaxPublishPerRun).arg(nextFrom).arg(nextTo).arg(dropped));
+            QMessageBox::information(
+                this, QStringLiteral("一次最多 21 章"),
+                QStringLiteral("番茄一次最多只能排 21 章定时发布，超出部分平台会拒绝。\n\n"
+                               "本次排：第 %1 ~ %2 章（共 %3 章，到 %4）\n"
+                               "这批发完后，把范围改成第 %5 ~ %6 章再点一次，接着排剩下的 %7 章。")
+                    .arg(plan.first().no).arg(plan.last().no).arg(plan.size())
+                    .arg(plan.last().when.toString(QStringLiteral("MM-dd HH:mm")))
+                    .arg(nextFrom).arg(nextTo).arg(dropped));
         }
 
         // 表格改成「实际计划」
