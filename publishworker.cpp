@@ -41,7 +41,10 @@ void PublishWorker::start(const PublishOptions &opt)
                  .arg(m_plan.size())
                  .arg(m_plan.isEmpty() ? 0 : m_plan.first().no)
                  .arg(m_plan.isEmpty() ? 0 : m_plan.last().no)
-                 .arg(opt.dryRun ? QStringLiteral("【演练模式：只填表不提交】") : QString()));
+                 .arg(opt.dryRun ? QStringLiteral("【演练模式：只填表核对时间，不会点「定时发布」】")
+                                 : QStringLiteral("【真实发布：会点「定时发布」并提交】")));
+    if (opt.dryRun)
+        emit log(QStringLiteral("  想真发就取消勾选「演练：只填表不提交」，再点一次「开始定时发布」。"));
     ensureWritePage();
 }
 
@@ -139,6 +142,7 @@ void PublishWorker::beginItem()
 
     m_selectRetry = m_dialogRetry = m_formRetry = 0;
     m_extraConfirm = 0;
+    m_resubmit = 0;
     m_itemFailed = false;
     m_seenMsgs.clear();
 
@@ -297,7 +301,8 @@ void PublishWorker::nextStep()
                                   r.value(QStringLiteral("why")).toString()), true);
                 return;
             }
-            emit log(QStringLiteral("  定时发布已填好：%1 %2").arg(gotDate, gotTime));
+            emit log(QStringLiteral("  定时发布已填好：%1 %2（%3）")
+                         .arg(gotDate, gotTime, r.value(QStringLiteral("via")).toString()));
             scheduleNext(P_Submit, 300);
         });
         break;
@@ -305,7 +310,8 @@ void PublishWorker::nextStep()
 
     case P_Submit:
         if (m_opt.dryRun) {
-            emit log(QStringLiteral("  【演练】日期时间已核对，关闭弹窗，不提交"));
+            emit log(QStringLiteral("  【演练】日期时间已核对；演练模式按设计不会点「定时发布」，"
+                                    "关掉弹窗继续下一章"));
             runJs(QStringLiteral("__yw.closePublishDialog()"), [this, gen](bool, const QJsonObject &) {
                 if (gen != m_gen) return;
                 scheduleNext(P_Next, 500);
@@ -326,7 +332,11 @@ void PublishWorker::nextStep()
                          true);
                 return;
             }
-            emit log(QStringLiteral("  已点「%1」，等结果…").arg(r.value(QStringLiteral("text")).toString()));
+            emit log(QStringLiteral("  已点「%1」（开关%2，点击后：%3），等结果…")
+                         .arg(r.value(QStringLiteral("text")).toString(),
+                              r.value(QStringLiteral("switchOn")).toBool() ? QStringLiteral("开")
+                                                                           : QStringLiteral("关"),
+                              r.value(QStringLiteral("react")).toString()));
             scheduleNext(P_WaitResult, 800);
         });
         break;
@@ -334,7 +344,7 @@ void PublishWorker::nextStep()
     case P_WaitResult:
         poll(QStringLiteral("__yw.publishState()"),
              [](const QJsonObject &o) { return !o.value(QStringLiteral("open")).toBool(); },
-             500, 25000,
+             500, 12000,
              [this, gen, it](bool closed, const QJsonObject &o) {
                  if (gen != m_gen) return;
                  QStringList msgs;
@@ -355,8 +365,22 @@ void PublishWorker::nextStep()
                                });
                          return;
                      }
-                     failItem(QStringLiteral("提交后弹窗没关（%1）")
-                                  .arg(msgs.isEmpty() ? QStringLiteral("页面没给提示")
+                     // 连确认框都没有 → 可能是合成事件没被按钮接住，用原生 click 再点一次
+                     if (m_resubmit == 0) {
+                         ++m_resubmit;
+                         emit log(QStringLiteral("  弹窗没关也没提示，用原生 click 再点一次「定时发布」…"));
+                         runJs(QStringLiteral("__yw.submitSchedule(true)"),
+                               [this, gen](bool ok2, const QJsonObject &r) {
+                                   if (gen != m_gen) return;
+                                   if (!ok2 || !r.value(QStringLiteral("ok")).toBool())
+                                       emit log(QStringLiteral("  再点也没点上：%1")
+                                                    .arg(r.value(QStringLiteral("why")).toString()));
+                                   scheduleNext(P_WaitResult, 800);
+                               });
+                         return;
+                     }
+                     failItem(QStringLiteral("点了「定时发布」但页面没反应（%1）")
+                                  .arg(msgs.isEmpty() ? QStringLiteral("弹窗没关，也没提示")
                                                       : msgs.join(QStringLiteral(" / "))),
                               true);
                      return;

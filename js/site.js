@@ -1,5 +1,5 @@
-// @sitejs 27  ← C++ 侧靠这一行判断 exe 目录里的 js/site.js 是不是本版本导出的；
-//               改脚本版本时这里和下面的 ver: 27 一起改，否则旧副本会被自动替换。
+// @sitejs 29  ← C++ 侧靠这一行判断 exe 目录里的 js/site.js 是不是本版本导出的；
+//               改脚本版本时这里和下面的 ver: 29 一起改，否则旧副本会被自动替换。
 // 起点作家助手（阅文 Electron 客户端 5.x）页面侧适配脚本
 // 由 ChapterUploader 通过 DevTools 协议注入，暴露 window.__yw 供 C++ 侧调用。
 // 选择器全部来自客户端 authorwrite_5.24.0 的渲染代码：
@@ -10,7 +10,7 @@
 //   一键改全部  button.modify-all
 //   编辑器      TinyMCE（inline），window.tinymce.activeEditor
 (function () {
-  if (window.__yw && window.__yw.ver >= 27) return 'cached';
+  if (window.__yw && window.__yw.ver >= 29) return 'cached';
 
   const txt = el => (el ? (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim() : '');
 
@@ -278,7 +278,7 @@
   const sleepMs = ms => new Promise(r => setTimeout(r, ms));
 
   const api = {
-    ver: 27,
+    ver: 29,
     _volCount: 0,        // 上次「全展开」时数到的分卷数
     _volAllOpen: false,  // 分卷是否已全部展开（避免每次都收起再展开，白折腾侧栏）
 
@@ -1227,6 +1227,11 @@
       let dd = api._pickerDropdown(kind);
       if (dd) return dd;
 
+      // 窗口在后台/最小化时 Chromium 不给这个页面渲染，面板根本不会挂出来，
+      // 而且定时器被节流到 1 秒一跳 —— 在这里死等就是每章白等 20 多秒。
+      // 直接返回 null，让上层走「键入」那条同步路径。
+      if (document.hidden) return null;
+
       const panelSel = kind === 'time' ? '.ant-picker-time-panel' : '.ant-picker-date-panel';
       const ev = (el, type) => {
         try {
@@ -1478,17 +1483,42 @@
                via: rd.via + ' / ' + rt.via };
     },
 
-    submitSchedule() {
+    // 点「定时发布」。ok=true 只表示「按钮找到了、也点下去了」，react 是点完立刻能看到的反应。
+    // 注意：定时开关关着的时候客户端把这个按钮写成「确认发布」，那是**立即发布**，误点就直接上架了，
+    // 所以开关没开时一律拒绝，绝不退而去点「确认发布」。
+    submitSchedule(native) {
       const m = api._publishModal();
       if (!m) return { ok: false, why: '发布弹窗不在了' };
+      const sw = api._schedSwitch();
+      const schedOn = !!sw && !!sw.checked;
       const btns = [...m.querySelectorAll('button')].filter(visible);
-      const hit = btns.find(b => /^(定时发布|确认发布|立即发布)$/.test(txt(b)));
-      if (!hit) return { ok: false, why: '弹窗里没有「定时发布」按钮',
-                         buttons: btns.map(txt).filter(Boolean).slice(0, 12) };
-      if (hit.disabled || hit.classList.contains('ant-btn-disabled'))
-        return { ok: false, why: '「' + txt(hit) + '」按钮是灰的（日期时间可能还没选好）' };
-      click(hit);
-      return { ok: true, text: txt(hit) };
+      const labels = btns.map(txt).filter(Boolean).slice(0, 12);
+
+      let hit = btns.find(b => /^定时发布$/.test(txt(b)));
+      if (!hit && !schedOn && btns.some(b => /^(确认发布|立即发布)$/.test(txt(b))))
+        return { ok: false, buttons: labels,
+                 why: '「定时发布」开关没打开（按钮是「确认发布」，点了会立即上架，已拒绝）' };
+      if (!hit && btns.some(b => /^(确认发布|立即发布)$/.test(txt(b))))
+        return { ok: false, buttons: labels,
+                 why: '开关是开的，但按钮还是「确认发布」，状态没同步' };
+      if (!hit) {
+        // 文案可能带图标/空格 → 退到弹窗底部最后一个主按钮
+        const foot = m.querySelector('.ant-modal-footer') || m;
+        const prim = [...foot.querySelectorAll('.ant-btn-primary')].filter(visible);
+        hit = prim[prim.length - 1] || null;
+      }
+      if (!hit) return { ok: false, why: '弹窗里没有「定时发布」按钮', buttons: labels };
+      if (hit.disabled || hit.classList.contains('ant-btn-disabled')
+          || hit.classList.contains('ant-btn-loading'))
+        return { ok: false, buttons: labels,
+                 why: '「' + txt(hit) + '」现在点不了（灰的/正在提交），日期时间可能还没选好' };
+
+      if (native) { try { hit.click(); } catch (e) { } } else click(hit);
+
+      const still = api._publishModal();
+      const react = !still ? 'closed'
+                  : (still.querySelector('.ant-btn-loading') ? 'loading' : 'none');
+      return { ok: true, text: txt(hit), switchOn: schedOn, react: react };
     },
 
     publishState() {

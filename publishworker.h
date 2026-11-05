@@ -97,6 +97,7 @@ private:
     int  m_dialogRetry = 0;
     int  m_formRetry = 0;
     int  m_extraConfirm = 0;
+    int  m_resubmit = 0;         // 点了「定时发布」但页面没反应时，用原生 click 再点一次
     int  m_consecutiveFails = 0;
     bool m_itemFailed = false;
     QStringList m_seenMsgs;      // 提交后页面弹出的提示，写进日志用

@@ -7,6 +7,7 @@
 
 #include <QMainWindow>
 #include <QDateTime>
+#include <QFile>
 #include <QJsonArray>
 
 class CdpClient;
@@ -129,6 +130,13 @@ private:
 
     bool m_connected = false;
     bool m_running = false;
+
+    // 本次定时发布是不是演练 / 结果计数（收尾时用来提示）
+    bool m_pubDry = false;
+    int  m_pubOk = 0;
+    int  m_pubFail = 0;
+
+    QFile m_logFile;                // 日志同时落盘，出问题直接把文件发过来就行
 
 protected:
     void closeEvent(QCloseEvent *e) override;

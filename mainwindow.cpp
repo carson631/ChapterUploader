@@ -50,7 +50,8 @@ namespace {
 // 为什么要这行：首次运行会把内置脚本导出一份到 exe 目录（方便现场改选择器不用重编），
 // 但升级 exe 之后这份旧副本会一直在，并优先于新内置脚本被注入 ——
 // 表现就是「客户端明明进了书，软件还是说读不到章节目录」（旧脚本里没有 chapterList）。
-constexpr int kSiteJsVer = 27;
+constexpr int kSiteJsVer = 29;
+#define CU_APP_VER "1.1.2"
 
 QByteArray builtinSiteScript()
 {
@@ -186,7 +187,7 @@ MainWindow::MainWindow(QWidget *parent)
     appSub->setObjectName(QStringLiteral("appSub"));
     hl->addWidget(appSub);
     hl->addSpacing(4);
-    auto *ver = new QLabel(QStringLiteral("v1.1.1"));
+    auto *ver = new QLabel(QStringLiteral("v" CU_APP_VER));
     ver->setObjectName(QStringLiteral("verChip"));
     hl->addWidget(ver);
     root->addWidget(header);
@@ -292,8 +293,21 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_pub, &PublishWorker::finished, this, [this](int ok, int fail) {
         m_running = false;
         updateRunUi();
+        m_pubOk = ok;
+        m_pubFail = fail;
         log(QStringLiteral("=== 结束：成功 %1，失败 %2 ===").arg(ok).arg(fail));
-        flushLog();
+        if (m_pubDry) {
+            log(QStringLiteral("本次是演练：%1 章的日期时间都核对过，但一章都没有真正发布。"
+                               "要真发请取消勾选「演练：只填表不提交」。").arg(ok));
+            flushLog();
+            QMessageBox::information(
+                this, QStringLiteral("演练结束"),
+                QStringLiteral("刚才只是演练，没有点「定时发布」，一章都没有真正排期。\n\n"
+                               "核对时间都正确的话，取消勾选「演练：只填表不提交」，"
+                               "再点一次「开始定时发布」就会真正提交。"));
+        } else {
+            flushLog();
+        }
     });
 
     m_autoConnect = new QTimer(this);
@@ -583,10 +597,16 @@ QWidget *MainWindow::buildLeftPanel()
 
     auto *schedRow2 = new QHBoxLayout;
     schedRow2->setSpacing(10);
-    m_dryRun = new QCheckBox(QStringLiteral("演练：只填表不提交"));
-    m_dryRun->setToolTip(QStringLiteral("逐章打开发布弹窗、勾定时发布、选好日期时间，然后关掉不点「定时发布」。\n"
-                                        "第一次用建议先演练一遍，确认日志里的日期时间和预期一致。"));
+    m_dryRun = new QCheckBox(QStringLiteral("演练：只核对时间，不点「定时发布」"));
+    m_dryRun->setToolTip(QStringLiteral("逐章打开发布弹窗、勾定时发布、选好日期时间，然后关掉——"
+                                        "不会点「定时发布」，所以不会真的排期。\n"
+                                        "第一次用建议先演练一遍，确认日志里的日期时间和预期一致；\n"
+                                        "核对没问题后取消勾选，再点「开始定时发布」才会真正提交。"));
     schedRow2->addWidget(m_dryRun);
+    connect(m_dryRun, &QCheckBox::toggled, this, [this]() {
+        refreshScheduleHint();
+        updateModeUi();          // 按钮文案会跟着变，别让人以为这是真发
+    });
     m_schedHint = new QLabel;
     m_schedHint->setProperty("role", "muted");
     m_schedHint->setWordWrap(true);
@@ -866,6 +886,8 @@ void MainWindow::refreshScheduleHint()
     if (QDateTime(QDate(m_startDate->date()), m_startTime->time()) <= QDateTime::currentDateTime())
         txt += QStringLiteral("　·　起始时间已过，自动顺延到 %1")
                    .arg(start.toString(QStringLiteral("yyyy-MM-dd")));
+    if (m_dryRun && m_dryRun->isChecked())
+        txt += QStringLiteral("　·　演练中：只核对时间，不会点「定时发布」");
     m_schedHint->setText(txt);
 }
 
@@ -903,10 +925,13 @@ void MainWindow::updateModeUi()
     }
     refreshScheduleHint();
 
-    if (m_startBtn)
+    if (m_startBtn) {
+        const bool dry = m_dryRun && m_dryRun->isChecked();
         m_startBtn->setText(draft   ? QStringLiteral("开始校对草稿")
-                            : publish ? QStringLiteral("开始定时发布")
+                            : publish ? (dry ? QStringLiteral("开始定时发布（演练·不会真发）")
+                                             : QStringLiteral("开始定时发布"))
                                       : QStringLiteral("开始上传"));
+    }
 }
 
 void MainWindow::refreshRangeBounds()
@@ -1300,7 +1325,11 @@ void MainWindow::startPublish()
                 .arg(start.toString(QStringLiteral("yyyy-MM-dd HH:mm")))
                 .arg(per).arg(gap)
                 .arg(plan.last().when.toString(QStringLiteral("yyyy-MM-dd HH:mm")))
-                .arg(dry ? QStringLiteral("（演练模式，不提交）") : QString()));
+                .arg(dry ? QStringLiteral("（演练模式：只核对时间，不会点「定时发布」）")
+                         : QStringLiteral("（真实发布）")));
+
+        m_pubDry = dry;
+        m_pubOk = m_pubFail = 0;
 
         PublishOptions opt;
         opt.bookName = m_bookName->currentText().trimmed();
@@ -1626,7 +1655,28 @@ void MainWindow::closeEvent(QCloseEvent *e)
 void MainWindow::log(const QString &msg)
 {
     const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("hh:mm:ss"));
-    m_logBuf << QStringLiteral("[%1] %2").arg(ts, msg);
+    const QString line = QStringLiteral("[%1] %2").arg(ts, msg);
+    m_logBuf << line;
+
+    // 同时落盘：出问题时不用截图，把 logs 里的文件发过来即可
+    if (!m_logFile.isOpen()) {
+        const QString dir = QCoreApplication::applicationDirPath() + QStringLiteral("/logs");
+        QDir().mkpath(dir);
+        m_logFile.setFileName(dir + QStringLiteral("/run-%1.log")
+                                       .arg(QDate::currentDate().toString(QStringLiteral("yyyyMMdd"))));
+        if (m_logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+            m_logFile.write(QStringLiteral("\n===== %1 启动（v%2）=====\n")
+                                .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
+                                     QStringLiteral(CU_APP_VER))
+                                .toUtf8());
+            m_logFile.flush();
+        }
+    }
+    if (m_logFile.isOpen()) {
+        m_logFile.write((line + QLatin1Char('\n')).toUtf8());
+        m_logFile.flush();
+    }
+
     if (!m_log)                       // 控件还没建好（构造早期），先攒着
         return;
     if (m_logBuf.size() >= 200)       // 一次刷太多行反而卡，先刷一批
