@@ -259,4 +259,23 @@ windeployqt --release --no-translations --no-opengl-sw dist/ChapterUploader.exe
 
 - `draftReady(no)` 必须同时回 `ok` 和 `ready`（草稿模式 `S_DraftWait` 的轮询读 `ready`，早期只回了 `ok`，导致连续 25 秒轮询全为假，最后按「正文为空」跳过）。
 - `pickChapter` / `selectChapter` 除了 `ok`，还会回 `via`（`route` = 按目录跳章、`click` = 点侧栏条目）和 `definitive`（=「目录里确实没这一章」，C++ 见到它就不再重试，直接判失败并打印真实原因）。
-- 改完 `js/site.js` 记得**同步 `dist/js/site.js`**（exe 优先读同目录的 js/site.js），并把顶部 `window.__yw.ver >= N` 与 `ver: N` 两处一起 +1，否则页面里已注入的旧脚本会被当成缓存直接返回。
+- 改完 `js/site.js` 记得**同步 `dist/js/site.js`**（exe 优先读同目录的 js/site.js），并把三处版本号一起 +1：文件头 `// @sitejs N`、`window.__yw.ver >= N`、`ver: N`，外加 `mainwindow.cpp` 里的 `kSiteJsVer`。少了页面那两处，已注入的旧脚本会被当缓存直接返回；少了 `@sitejs` 那处，新 exe 会把这份副本判成旧版、退回内置脚本。
+
+### 读不到章节目录 / `__yw.chapterList is not a function`
+
+**症状**：客户端明明已经进了书、侧栏也能看到章节，点「开始定时发布」还是弹「读不到这本书的章节目录」，日志里带着 `is not a function`。
+
+**原因**：`window.__yw` 是**上一版脚本**注入的。exe 第一次运行会把内置脚本导出成 `exe目录/js/site.js` 方便现场改选择器，升级后这份旧副本会一直留在原地，并盖掉 exe 里编译进去的新脚本 —— 旧脚本里当然没有 `chapterList`。
+
+**怎么查**：
+
+```bash
+# 看页面里到底是哪一版
+python tools/probe.py "JSON.stringify({ver: window.__yw && window.__yw.ver, has: window.__yw && typeof window.__yw.chapterList})"
+# 读目录读不到时，问它卡在哪一步
+python tools/probe.py "JSON.stringify(__yw.storeProbe())"
+```
+
+**怎么修**（v1.1.1 起自动处理）：删掉 `exe目录/js/site.js`，点「断开 → 连接页面」重新注入；或者直接升级到带版本校验的 exe —— 它发现副本头部的 `// @sitejs N` 不是本版本号就自动覆盖，并在日志里打一行「已自动更新到 vN」。
+
+> 另一个隐蔽坑：`chapterStore` 的「回收站」卷里存着删掉的旧章，编号会和正文撞车（同一个「第173章」两条，一条 `status=1`、一条 `status=7`）。脚本原先照单全收，排期时后者盖掉前者，`173/174/175/176/180` 就被当成「回收站」跳过了。v1.1.1 起把 `status=7` 与「回收站」卷整卷排除。

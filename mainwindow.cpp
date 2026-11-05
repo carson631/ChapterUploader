@@ -46,25 +46,62 @@
 
 namespace {
 
-QString siteScript()
-{
-    // 优先读 exe 同目录的 js/site.js（可现场改选择器，不用重编）；
-    // 没有就从资源里读，并顺手释放一份出来。
-    const QString extPath = QCoreApplication::applicationDirPath() + QStringLiteral("/js/site.js");
-    QFile ext(extPath);
-    if (ext.open(QIODevice::ReadOnly))
-        return QString::fromUtf8(ext.readAll());
+// 页面脚本版本：必须和 js/site.js 头部的「// @sitejs NN」一致。
+// 为什么要这行：首次运行会把内置脚本导出一份到 exe 目录（方便现场改选择器不用重编），
+// 但升级 exe 之后这份旧副本会一直在，并优先于新内置脚本被注入 ——
+// 表现就是「客户端明明进了书，软件还是说读不到章节目录」（旧脚本里没有 chapterList）。
+constexpr int kSiteJsVer = 26;
 
+QByteArray builtinSiteScript()
+{
     QFile res(QStringLiteral(":/js/site.js"));
     if (!res.open(QIODevice::ReadOnly))
-        return QString();
+        return QByteArray();
+    return res.readAll();
+}
 
-    const QByteArray data = res.readAll();
-    QDir().mkpath(QCoreApplication::applicationDirPath() + QStringLiteral("/js"));
-    QFile out(extPath);
+void writeSiteScript(const QString &path, const QByteArray &data)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile out(path);
     if (out.open(QIODevice::WriteOnly | QIODevice::Truncate))
         out.write(data);
-    return QString::fromUtf8(data);
+}
+
+// 优先读 exe 同目录的 js/site.js（可现场改选择器，不用重编），但要认版本标记：
+//   · 标记是本版本        → 直接用（当作用户自定义）
+//   · 标记是旧版本        → 判定为升级残留，用内置脚本覆盖掉
+//   · 没有标记            → 不落盘，本次用内置脚本（可能是更老的副本）
+QString siteScript(QString *note = nullptr)
+{
+    const QString extPath = QCoreApplication::applicationDirPath() + QStringLiteral("/js/site.js");
+    const QByteArray builtin = builtinSiteScript();
+    const QString mark = QStringLiteral("@sitejs %1").arg(kSiteJsVer);
+
+    QFile ext(extPath);
+    if (ext.open(QIODevice::ReadOnly)) {
+        const QString text = QString::fromUtf8(ext.readAll());
+        ext.close();
+
+        if (text.contains(mark))
+            return text;                                  // 版本对得上 → 用它
+
+        if (builtin.isEmpty())
+            return text;                                  // 没有内置可退，只能将就
+
+        if (text.contains(QStringLiteral("@sitejs "))) {
+            writeSiteScript(extPath, builtin);            // 旧版本副本 → 就地更新
+            if (note)
+                *note = QStringLiteral("exe 目录的 js/site.js 是旧版本，已自动更新到 v%1").arg(kSiteJsVer);
+        } else if (note) {
+            *note = QStringLiteral("exe 目录的 js/site.js 没有版本标记（疑似旧副本），本次改用内置脚本；"
+                                   "若确认是手改版，请在文件头加「// %1」").arg(mark);
+        }
+    } else if (!builtin.isEmpty()) {
+        writeSiteScript(extPath, builtin);                // 首次运行导出一份出来
+    }
+
+    return builtin.isEmpty() ? QString() : QString::fromUtf8(builtin);
 }
 
 QLabel *mutedLabel(const QString &text)
@@ -149,7 +186,7 @@ MainWindow::MainWindow(QWidget *parent)
     appSub->setObjectName(QStringLiteral("appSub"));
     hl->addWidget(appSub);
     hl->addSpacing(4);
-    auto *ver = new QLabel(QStringLiteral("v1.1.0"));
+    auto *ver = new QLabel(QStringLiteral("v1.1.1"));
     ver->setObjectName(QStringLiteral("verChip"));
     hl->addWidget(ver);
     root->addWidget(header);
@@ -980,7 +1017,10 @@ void MainWindow::toggleConnect()
 
 void MainWindow::injectSiteScript()
 {
-    const QString js = siteScript();
+    QString note;
+    const QString js = siteScript(&note);
+    if (!note.isEmpty())
+        log(QStringLiteral("· %1").arg(note));
     if (js.isEmpty()) {
         log(QStringLiteral("✗ 找不到 js/site.js"));
         return;
@@ -991,10 +1031,27 @@ void MainWindow::injectSiteScript()
             return;
         }
         log(QStringLiteral("站点脚本就绪：%1").arg(v.toString()));
-        m_cdp->evaluate(QStringLiteral("JSON.stringify(__yw.info())"),
-                        [this](bool ok2, const QJsonValue &v2, const QString &) {
-            if (ok2)
-                log(QStringLiteral("当前页面：%1").arg(v2.toString()));
+        // 注入后再自检一次：页面里可能残留旧版 __yw，或者连的根本不是写作页
+        m_cdp->evaluate(QStringLiteral(
+                            "JSON.stringify({ver: window.__yw && window.__yw.ver,"
+                            " chapterList: typeof (window.__yw && window.__yw.chapterList),"
+                            " date: typeof (window.__yw && window.__yw.setScheduleDate),"
+                            " hash: location.hash})"),
+                        [this](bool ok2, const QJsonValue &v2, const QString &e2) {
+            if (!ok2) {
+                log(QStringLiteral("✗ 自检失败：%1").arg(e2));
+                return;
+            }
+            log(QStringLiteral("脚本自检：%1").arg(v2.toString()));
+            const QJsonObject o = QJsonDocument::fromJson(v2.toString().toUtf8()).object();
+            if (o.value(QStringLiteral("chapterList")).toString() != QLatin1String("function"))
+                log(QStringLiteral("✗ 页面里的脚本缺 chapterList（多半是 exe 目录留着旧版 js/site.js）；"
+                                   "删掉它再点「断开 → 连接页面」"));
+            if (o.value(QStringLiteral("date")).toString() != QLatin1String("function"))
+                log(QStringLiteral("✗ 页面里的脚本缺 setScheduleDate（同上，脚本版本不对）"));
+            if (!o.value(QStringLiteral("hash")).toString().startsWith(QLatin1String("#/chapter/")))
+                log(QStringLiteral("· 当前不在写作页（hash=%1），章节目录要进书之后才读得到")
+                        .arg(o.value(QStringLiteral("hash")).toString()));
         });
     });
 }
@@ -1167,11 +1224,24 @@ void MainWindow::startPublish()
             log(QStringLiteral("✗ 读不到客户端章节目录（%1）")
                     .arg(ok ? QStringLiteral("目录为空，可能还停在书架页")
                             : err));
+            const bool staleScript = err.contains(QStringLiteral("is not a function"));
+            if (staleScript)
+                log(QStringLiteral("  页面里的 __yw 不是本版本的脚本：删掉 exe 目录下的 js/site.js，"
+                                   "再点「断开 → 连接页面」重新注入"));
+            m_cdp->evaluate(QStringLiteral("JSON.stringify(__yw.storeProbe && __yw.storeProbe())"),
+                            [this](bool ok3, const QJsonValue &v3, const QString &) {
+                if (ok3)
+                    log(QStringLiteral("  现场诊断：%1").arg(v3.toString()));
+            });
             QMessageBox::information(
-                this, QStringLiteral("先进入作品"),
-                QStringLiteral("读不到这本书的章节目录。\n\n"
-                               "请先在左上角点「进入作品」，等客户端切到这本书的写作页"
-                               "（侧栏能看到「草稿/已发布」两个标签），再点「开始定时发布」。"));
+                this, QStringLiteral("读不到章节目录"),
+                staleScript
+                    ? QStringLiteral("注入到客户端的脚本是旧版本，里面没有「读目录」这个功能。\n\n"
+                                     "删掉软件目录里的 js\\site.js，再点「断开」→「连接页面」"
+                                     "重新注入即可（新版会自动换回内置脚本）。")
+                    : QStringLiteral("读不到这本书的章节目录。\n\n"
+                                     "请先在左上角点「进入作品」，等客户端切到这本书的写作页"
+                                     "（侧栏能看到「草稿/已发布」两个标签），再点「开始定时发布」。"));
             return;
         }
 

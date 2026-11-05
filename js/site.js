@@ -1,3 +1,5 @@
+// @sitejs 26  ← C++ 侧靠这一行判断 exe 目录里的 js/site.js 是不是本版本导出的；
+//               改脚本版本时这里和下面的 ver: 26 一起改，否则旧副本会被自动替换。
 // 起点作家助手（阅文 Electron 客户端 5.x）页面侧适配脚本
 // 由 ChapterUploader 通过 DevTools 协议注入，暴露 window.__yw 供 C++ 侧调用。
 // 选择器全部来自客户端 authorwrite_5.24.0 的渲染代码：
@@ -8,7 +10,7 @@
 //   一键改全部  button.modify-all
 //   编辑器      TinyMCE（inline），window.tinymce.activeEditor
 (function () {
-  if (window.__yw && window.__yw.ver >= 25) return 'cached';
+  if (window.__yw && window.__yw.ver >= 26) return 'cached';
 
   const txt = el => (el ? (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim() : '');
 
@@ -276,7 +278,7 @@
   const sleepMs = ms => new Promise(r => setTimeout(r, ms));
 
   const api = {
-    ver: 25,
+    ver: 26,
     _volCount: 0,        // 上次「全展开」时数到的分卷数
     _volAllOpen: false,  // 分卷是否已全部展开（避免每次都收起再展开，白折腾侧栏）
 
@@ -548,6 +550,9 @@
           const t = String(c.chaptertitle || '').trim();
           const m = t.match(/^第\s*(\d+)\s*章/);
           if (!m) return;
+          // 「回收站」卷里的同名章是删掉的副本，编号会和正文里的章撞车；
+          // 留着会让「第173章」被判成已删/已存在，所以直接排除。
+          if (String(c.status) === '7' || /回收站/.test(String(v.volumename || ''))) return;
           out.push({ no: parseInt(m[1], 10), title: t,
                      ccid: String(c.CCID || ''), cbid: String(c.CBID || v.CBID || ''),
                      words: parseInt(c.actualwords || c.originalwords || 0, 10) || 0,
@@ -1109,6 +1114,9 @@
           const t = String(c.chaptertitle || '').trim();
           const m = t.match(/^第\s*(\d+)\s*章/);
           if (!m) return;
+          // 回收站里的删稿副本编号会和正文撞车（同一个「第173章」两条），
+          // 留着会让排期把它当「回收站」跳过，所以这里直接丢掉。
+          if (String(c.status) === '7' || /回收站/.test(String(v.volumename || ''))) return;
           out.push({
             no: parseInt(m[1], 10), title: t,
             status: String(c.status === undefined ? '' : c.status),
@@ -1119,6 +1127,25 @@
         out.sort((a, b) => a.no - b.no);
         return out.length ? out : null;
       } catch (e) { return null; }
+    },
+
+    // 诊断：chapterList 读不到时，用它说明卡在哪一步（写进软件日志，省得靠猜）
+    storeProbe() {
+      const r = { ver: api.ver, route: location.hash, hasApp: !!document.querySelector('#app') };
+      try {
+        const app = document.querySelector('#app');
+        const pinia = app && app.__vue_app__ && app.__vue_app__.config.globalProperties.$pinia;
+        r.hasPinia = !!pinia;
+        const st = pinia && pinia.state && pinia.state.value;
+        r.stores = st ? Object.keys(st).slice(0, 30) : [];
+        r.hasChapterStore = !!(st && st.chapterStore);
+        const cs = st && st.chapterStore && st.chapterStore.ChapterState;
+        r.listLen = cs && Array.isArray(cs.list) ? cs.list.length : -1;
+        if (cs && Array.isArray(cs.list) && cs.list.length) {
+          r.vols = cs.list.map(v => (v.volumename || '') + ':' + ((v.chapters || []).length));
+        }
+      } catch (e) { r.err = String(e); }
+      return r;
     },
 
     chapterStatus(no) {
